@@ -13,7 +13,10 @@ _here = os.path.dirname(os.path.abspath(__file__))
 if _here not in sys.path:
     sys.path.append(_here)
 
-from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS  # noqa: E402
+if __package__:  # imported as a package (ComfyUI)
+    from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS  # noqa: E402
+else:  # imported as a plain module, e.g. by pytest collecting the repo root
+    NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS = {}, {}
 
 WEB_DIRECTORY = "./web/js"
 
