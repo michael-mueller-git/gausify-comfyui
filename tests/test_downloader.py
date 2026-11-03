@@ -74,8 +74,7 @@ def test_download_verify_extract(server, tmp_path):
     exe = downloader.ensure_binary("fake-tool", manifest=m)
     assert exe.read_bytes().startswith(b"#!/bin/sh")
     assert exe.parent == tmp_path / "bin" / "fake-tool" / "1.2.3-linux-x64"
-    if os.name != "nt":
-        assert os.access(exe, os.X_OK)
+    assert os.access(exe, os.X_OK)
     # Cached: no second request.
     assert downloader.ensure_binary("fake-tool", manifest=m) == exe
     assert _Handler.hits == {"/fake-tool-1.2.3.tar.xz": 1}
@@ -100,14 +99,12 @@ def test_null_sha_warns(server, caplog):
     assert "not verified" in caplog.text
 
 
-def test_zip_nested_exe(server, monkeypatch):
-    monkeypatch.setattr(downloader, "platform_key", lambda: "windows-x64")
+def test_zip_nested_exe(server):
     root, base = server
-    sha = _zip(root / "c.zip", {"bin/colmap.exe": b"MZ", "COLMAP.bat": b"@echo"})
-    exe = downloader.ensure_binary(
-        "fake-tool", manifest=_manifest(base + "/c.zip", sha, "bin/colmap.exe", "windows-x64")
-    )
-    assert exe.name == "colmap.exe" and exe.read_bytes() == b"MZ"
+    sha = _zip(root / "c.zip", {"bin/tool": b"#!/bin/sh\n", "README": b"x"})
+    exe = downloader.ensure_binary("fake-tool", manifest=_manifest(base + "/c.zip", sha, "bin/tool"))
+    assert exe.name == "tool" and exe.read_bytes() == b"#!/bin/sh\n"
+    assert os.access(exe, os.X_OK)
 
 
 def test_missing_exe_in_archive(server):
@@ -170,12 +167,10 @@ def test_bin_dir_default(monkeypatch):
 
 def test_manifest_shape():
     m = downloader.load_manifest()
-    assert set(m) >= {"brush-cli", "colmap-windows"}
-    assert set(m["brush-cli"]["platforms"]) == {"linux-x64", "windows-x64"}
+    assert set(m) == {"brush-cli"}
+    assert set(m["brush-cli"]["platforms"]) == {"linux-x64"}
     for entry in m.values():
         for p in entry["platforms"].values():
             assert p["url"].startswith("https://") and p["exe"]
             assert p["sha256"] is None or len(p["sha256"]) == 64
-    colmap = m["colmap-windows"]["platforms"]["windows-x64"]
-    assert colmap["url"].format(version=m["colmap-windows"]["version"]).endswith("/4.2.1/colmap-x64-windows-cuda.zip")
     json.dumps(m)

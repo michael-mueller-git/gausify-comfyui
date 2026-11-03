@@ -5,7 +5,6 @@
 #
 #   brush/build.sh                      release build for the host
 #   brush/build.sh --zigbuild --target x86_64-unknown-linux-gnu.2.28
-#   brush/build.sh --target x86_64-pc-windows-msvc
 #   brush/build.sh --check              cargo check only
 #   brush/build.sh --prepare            clone + patch only
 #   brush/build.sh --out DIR            copy the binary into DIR
@@ -32,7 +31,7 @@ while [ $# -gt 0 ]; do
     --zigbuild) zig=1; shift ;;
     --check) mode=check; shift ;;
     --prepare) mode=prepare; shift ;;
-    --out) out="$2"; shift 2 ;;
+    --out) mkdir -p "$2"; out="$(cd "$2" && pwd)"; shift 2 ;;
     -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -71,7 +70,6 @@ else
 fi
 
 exe=brush-cli
-case "${target:-$(rustc -vV | sed -n 's/^host: //p')}" in *windows*) exe=brush-cli.exe ;; esac
 # zigbuild's glibc suffix (x86_64-unknown-linux-gnu.2.28) is not part of the dir name.
 dir="$CARGO_TARGET_DIR/${target%%.*}/release"
 [ -n "$target" ] || dir="$CARGO_TARGET_DIR/release"

@@ -3,7 +3,6 @@ numpy
 scipy
 opencv-python-headless==4.12.*
 pillow
-pycolmap-cuda12==4.2.1; sys_platform == "linux"
-nvidia-cuda-runtime-cu12; sys_platform == "linux"
-nvidia-curand-cu12; sys_platform == "linux"
-pycolmap==4.2.1; sys_platform == "win32"
+pycolmap-cuda12==4.2.1
+nvidia-cuda-runtime-cu12
+nvidia-curand-cu12

@@ -40,7 +40,7 @@ Rules for every module:
 | `gausify/downloader.py` | `ensure_binary(name: str) -> Path` using `gausify/binaries.json` (sha256-verified, lock file, cache in `ComfyUI/models/gausify/bin` or `$GAUSIFY_BIN_DIR`) | — |
 | `gausify/brush.py` | `train(dataset_dir, args: list[str], out_ply, init_ply=None, progress, cancel) -> dict(psnr: float|None, splats: int)` runs `brush-cli`; `render(ply, cameras: list[dict(R,t,f,cx,cy,width,height)]) -> list[dict(rgba: (H,W,4) float32, depth: (H,W) float32)]` runs `brush-cli render` (our patch `brush/patches/gausify-cli.patch`, same renderer as `renderColor`/`renderDepth` in render.patch/geom.patch) | — |
 | `gausify/cuda_libs.py` | `preload()` — ctypes-loads `libcudart.so.12`/`libcurand.so.10` from the `nvidia-*-cu12` wheels (RTLD_GLOBAL) before `import pycolmap` | — |
-| `gausify/sfm_colmap.py` | `colmap_poses(images_dir, names, masks_dir|None, pairs, progress, cancel) -> SfmModel` (pycolmap; Windows: official COLMAP CUDA CLI for features/matching) | `web/src/sfm/colmap-sfm.ts` |
+| `gausify/sfm_colmap.py` | `colmap_poses(images_dir, names, masks_dir|None, pairs, progress, cancel) -> SfmModel` (pycolmap-cuda12) | `web/src/sfm/colmap-sfm.ts` |
 | `gausify/sfm_akaze/` | `akaze_poses(images_dir, names, masks_dir|None, pairs, max_side, max_features, progress, cancel) -> (SfmModel, matches)` | `web/src/sfm/{features.worker,matcher,geometry,linalg,reconstruct,ba}.ts` |
 | `gausify/sfm.py` | `run_sfm(images_dir, names, masks_dir, estimator, window, closed_loop, flat_orbit, fill_missing, times) -> SfmModel` (pairs -> estimator -> flatten/fill -> stats) | `web/src/sfm/index.ts` (`runSfm`) |
 | `gausify/posecheck/` | `check_poses(cams: OrbitCameras, mode: "auto"|"always", progress, cancel) -> dict|None` | `web/src/posecheck/*`, docs/web.md "Pose check" |
@@ -50,5 +50,4 @@ Rules for every module:
 
 - `brush-cli` built by `.github/workflows/build-brush.yml` from Brush `38185dedaf8143988a31a64c1f27c2323b1febdf`
   with `brush/patches/{brush-js,geom,deg,render}.patch` (order of `$REF/scripts/build-brush-web.mjs`) then `gausify-cli.patch`.
-- COLMAP: Linux `pycolmap-cuda12==4.2.1` (pip); Windows `pycolmap==4.2.1` + official
-  `colmap-x64-windows-cuda.zip` 4.2.1 downloaded on first use.
+- COLMAP: `pycolmap-cuda12==4.2.1` (pip). Linux x86-64 only.

@@ -1,4 +1,4 @@
-"""The "colmap" pose estimator, on pycolmap (and the COLMAP CLI on Windows).
+"""The "colmap" pose estimator, on pycolmap.
 
 Port of gausify-orbit web/src/sfm/colmap-sfm.ts and the colmap-wasm package it
 uses (github.com/obraia/colmap-wasm: native/entry/web.cc, src/worker.ts,
@@ -27,8 +27,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -181,46 +179,6 @@ def _match_pycolmap(pycolmap, db, pairs_file, gpu, watch):
         **kw,
     )
     watch.check()
-
-
-def _colmap_cli(exe: Path, *args: str) -> None:
-    r = subprocess.run([str(exe), *args], capture_output=True, text=True)
-    if r.returncode != 0:
-        tail = "\n".join((r.stderr or r.stdout).strip().splitlines()[-20:])
-        raise RuntimeError(f"colmap {args[0]} failed ({r.returncode}):\n{tail}")
-
-
-def _extract_match_cli(db, images_dir, names, masks, pairs_file, work, progress):
-    """Windows: the official COLMAP CUDA build for SIFT and matching (pycolmap's
-    Windows wheel has no CUDA), same options."""
-    from .downloader import ensure_binary
-
-    exe = ensure_binary("colmap-windows")
-    lst = work / "images.txt"
-    lst.write_text("".join(n + "\n" for n in names))
-    args = [
-        "feature_extractor",
-        "--database_path", str(db),
-        "--image_path", str(images_dir),
-        "--image_list_path", str(lst),
-        "--ImageReader.single_camera", "1",
-        "--ImageReader.camera_model", CAMERA_MODEL,
-        "--FeatureExtraction.use_gpu", "1",
-    ]
-    if masks is not None:
-        args += ["--ImageReader.mask_path", str(masks)]
-    _colmap_cli(exe, *args)
-    if progress:
-        progress(0.45, "COLMAP SIFT features done")
-    _colmap_cli(
-        exe,
-        "matches_importer",
-        "--database_path", str(db),
-        "--match_list_path", str(pairs_file),
-        "--match_type", "pairs",
-        "--FeatureMatching.use_gpu", "1",
-        "--TwoViewGeometry.random_seed", str(SEED),
-    )
 
 
 # ---------------------------------------------------------------- mapping
@@ -378,7 +336,6 @@ def colmap_poses_with_matches(
     probe = _rgb_u8(images_dir, names[0])
     height, width = probe.shape[:2]
     gpu = use_gpu(pycolmap)
-    windows = sys.platform == "win32"
     tmp = tempfile.TemporaryDirectory(prefix="gausify-colmap-", dir=work_dir)
     work = Path(tmp.name)
     try:
@@ -389,18 +346,14 @@ def colmap_poses_with_matches(
             t0 = time.perf_counter()
             if progress:
                 progress(0.0, "COLMAP SIFT features")
-            if windows:
-                _extract_match_cli(db, images_dir, names, masks, pairs_file, work, progress)
-                t1 = time.perf_counter()
-            else:
-                _extract_pycolmap(pycolmap, db, images_dir, names, masks, gpu, watch, progress)
-                t1 = time.perf_counter()
-                if progress:
-                    progress(0.45, "COLMAP SIFT matching")
-                _match_pycolmap(pycolmap, db, pairs_file, gpu, watch)
+            _extract_pycolmap(pycolmap, db, images_dir, names, masks, gpu, watch, progress)
+            t1 = time.perf_counter()
+            if progress:
+                progress(0.45, "COLMAP SIFT matching")
+            _match_pycolmap(pycolmap, db, pairs_file, gpu, watch)
             id_to_idx, xy, matches, _ = _read_db(pycolmap, db, names)
             mean_feat = sum(len(k) for k in xy) / len(xy)
-            log(f"COLMAP SIFT features: mean {mean_feat:.0f}/image in {t1 - t0:.1f} s ({'GPU' if gpu or windows else 'CPU'})")
+            log(f"COLMAP SIFT features: mean {mean_feat:.0f}/image in {t1 - t0:.1f} s ({'GPU' if gpu else 'CPU'})")
             t2 = time.perf_counter()
             mean_m = sum(len(m["idx"]) for m in matches) / max(len(matches), 1)
             log(f"SIFT matching: {len(pairs)} pairs, mean {mean_m:.0f} matches in {t2 - t1:.1f} s")

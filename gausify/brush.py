@@ -88,7 +88,6 @@ def _run(cmd: list[str], on_event: Callable[[dict], None], cancel: Cancel) -> tu
     """Run `cmd`, feeding each GAUSIFY event to `on_event`. Returns
     (exit code, last output lines, last `error` event)."""
     log.debug("running %s", " ".join(cmd))
-    creation = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -98,7 +97,6 @@ def _run(cmd: list[str], on_event: Callable[[dict], None], cancel: Cancel) -> tu
         encoding="utf-8",
         errors="replace",
         bufsize=1,
-        creationflags=creation,
     )
     tail: deque[str] = deque(maxlen=60)
     lines: queue.Queue[str | None] = queue.Queue()

@@ -7,7 +7,7 @@ sharp-frame selection, camera poses (AKAZE + incremental SfM, or COLMAP's SIFT
 + global mapper), optional masked (cut-out) training, and training with
 [Brush](https://github.com/ArthurBrussee/brush).
 
-**NVIDIA / CUDA only** (Linux and Windows).
+**NVIDIA / CUDA only, Linux x86-64 only.**
 
 ## Nodes (category "Gausify Orbit")
 
@@ -41,9 +41,7 @@ pip install -r gausify-comfyui/requirements.txt
 
 Keep a folder name other than `gausify` (that name is the library package
 inside). Dependencies: numpy, scipy, opencv-python-headless 4.12, pillow and
-COLMAP 4.2.1 (`pycolmap-cuda12` + CUDA runtime wheels on Linux; `pycolmap`
-on Windows, plus the official COLMAP CUDA build downloaded on first use for
-SIFT/matching). `brush-cli` is downloaded on first use into
+COLMAP 4.2.1 (`pycolmap-cuda12` + CUDA runtime wheels). `brush-cli` is downloaded on first use into
 `ComfyUI/models/gausify/bin` (override with `GAUSIFY_BIN_DIR`).
 
 Working files (frames, masks, COLMAP models) go to ComfyUI's temp folder,

@@ -1,7 +1,6 @@
 """gausify/brush.py against a fake brush-cli speaking the GAUSIFY protocol."""
 
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -70,8 +69,6 @@ emit(event="done", iter=stop, total=total, splats=100 + stop, psnr=27.5, ssim=0.
 
 @pytest.fixture
 def fake(tmp_path, monkeypatch):
-    if os.name == "nt":
-        pytest.skip("fake executable is a POSIX script")
     exe = tmp_path / "brush-cli"
     exe.write_text(f"#!{sys.executable}\n" + FAKE)
     exe.chmod(0o755)

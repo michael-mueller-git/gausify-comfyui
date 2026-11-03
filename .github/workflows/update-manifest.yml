@@ -39,7 +39,7 @@ jobs:
           mkdir -p assets
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets --pattern 'brush-cli-*'
           cd assets
-          for f in *.tar.xz *.zip; do
+          for f in *.tar.xz; do
             [ -f "$f" ] || continue
             got="$(sha256sum "$f" | awk '{print $1}')"
             if [ -f "$f.sha256" ] && [ "$(tr -d ' \n' < "$f.sha256")" != "$got" ]; then
@@ -59,7 +59,7 @@ jobs:
           m = json.loads(path.read_text())
           entry = m["brush-cli"]
           entry["version"] = version
-          ext = {"linux-x64": "tar.xz", "windows-x64": "zip"}
+          ext = {"linux-x64": "tar.xz"}
           for plat, p in entry["platforms"].items():
               name = f"brush-cli-{version}-{plat}.{ext[plat]}"
               asset = pathlib.Path("assets") / name

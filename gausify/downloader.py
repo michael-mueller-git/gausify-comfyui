@@ -24,7 +24,6 @@ import stat
 import sys
 import tarfile
 import tempfile
-import time
 import urllib.request
 import zipfile
 from collections.abc import Callable
@@ -38,17 +37,10 @@ CHUNK = 1 << 20
 
 
 def platform_key() -> str:
-    """`linux-x64`, `windows-x64`, `linux-arm64`, `macos-arm64`, ..."""
+    """`linux-x64`, `linux-arm64`, ... (only `linux-x64` binaries are published)."""
     machine = platform.machine().lower()
     arch = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(machine, machine)
-    if sys.platform.startswith("linux"):
-        osname = "linux"
-    elif sys.platform == "win32":
-        osname = "windows"
-    elif sys.platform == "darwin":
-        osname = "macos"
-    else:
-        osname = sys.platform
+    osname = "linux" if sys.platform.startswith("linux") else sys.platform
     return f"{osname}-{arch}"
 
 
@@ -80,29 +72,13 @@ def file_lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     f = open(path, "a+b")  # noqa: SIM115 - held for the duration of the context
     try:
-        if os.name == "nt":
-            import msvcrt
+        import fcntl
 
-            f.seek(0)
-            while True:
-                try:
-                    msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
-                    break
-                except OSError:  # LK_LOCK gives up after ~10 s; keep waiting.
-                    time.sleep(0.5)
-            try:
-                yield
-            finally:
-                f.seek(0)
-                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     finally:
         f.close()
 
@@ -160,8 +136,7 @@ def _extract(archive: Path, dest: Path) -> None:
 
 
 def _make_executable(path: Path) -> None:
-    if os.name != "nt":
-        path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
 def ensure_binary(
