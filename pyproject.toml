@@ -21,12 +21,6 @@ dependencies = [
 [project.urls]
 Repository = "https://github.com/michael-mueller-git/gausify-comfyui"
 
-[tool.comfy]
-PublisherId = "michael-mueller-git"
-DisplayName = "Gausify Orbit"
-Icon = ""
-includes = []
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

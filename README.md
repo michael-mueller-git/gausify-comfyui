@@ -31,7 +31,7 @@ and the pose check becomes available.
 
 ## Install
 
-Via ComfyUI-Manager / the Comfy Registry (`gausify-comfyui`), or:
+Manual install:
 
 ```bash
 cd ComfyUI/custom_nodes
