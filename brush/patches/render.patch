@@ -1,0 +1,71 @@
+diff --git a/apps/brush-js/src/lib.rs b/apps/brush-js/src/lib.rs
+index 42193a3..e03d2f9 100644
+--- a/apps/brush-js/src/lib.rs
++++ b/apps/brush-js/src/lib.rs
+@@ -534,6 +534,66 @@ impl Training {
+     }
+ }
+ 
++#[wasm_bindgen]
++impl Training {
++    /// Colour and accumulated alpha of the current splats (with their
++    /// spherical harmonics) seen from a pinhole camera, as interleaved
++    /// `[r, g, b, alpha]` per pixel, row-major, over a black background (so
++    /// the colour is premultiplied). Same camera arguments as `renderDepth`.
++    /// Resolves to `null` before any splats exist.
++    #[allow(clippy::too_many_arguments)]
++    #[wasm_bindgen(js_name = renderColor)]
++    pub async fn render_color(
++        &self,
++        position: Vec<f32>,
++        rotation: Vec<f32>,
++        fx: f32,
++        fy: f32,
++        cx: f32,
++        cy: f32,
++        width: u32,
++        height: u32,
++    ) -> Result<Option<js_sys::Float32Array>, JsValue> {
++        use brush_render::camera::{Camera, focal_to_fov};
++        use brush_render::kernels::camera_model::CameraModel;
++        use brush_render::{TextureMode, render_splats};
++
++        if position.len() != 3 || rotation.len() != 4 {
++            return Err(js_err_str("renderColor: position needs 3 values and rotation 4"));
++        }
++        let Some(splats) = self.splat_view.latest() else {
++            return Ok(None);
++        };
++        let splats = splats.scaled(self.units_per_meter.get());
++        let pos = glam::Vec3::new(position[0], position[1], position[2]);
++        let rot = glam::Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]).normalize();
++        let camera = Camera::new(
++            pos,
++            rot,
++            focal_to_fov(fx as f64, width, &CameraModel::Pinhole),
++            focal_to_fov(fy as f64, height, &CameraModel::Pinhole),
++            glam::vec2(cx / width as f32, cy / height as f32),
++            CameraModel::Pinhole,
++        );
++        let (img, _) = render_splats(
++            splats,
++            &camera,
++            glam::uvec2(width, height),
++            glam::Vec3::ZERO,
++            None,
++            TextureMode::Float,
++        )
++        .await;
++        let data = img
++            .into_data_async()
++            .await
++            .map_err(|e| js_err_str(&format!("{e:?}")))?
++            .try_into_vec::<f32>()
++            .map_err(|e| js_err_str(&format!("{e:?}")))?;
++        Ok(Some(js_sys::Float32Array::from(data.as_slice())))
++    }
++}
++
+ /// Round-trip the initial `TrainStreamConfig` through a JS async callback.
+ /// Returns `None` to signal "user cancelled" — the JS callback can throw,
+ /// reject the promise, or explicitly return `null` / `undefined` to abort

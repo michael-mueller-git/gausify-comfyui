@@ -1,0 +1,183 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index c2c5f52..2e64c9d 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1103,10 +1103,12 @@ version = "1.0.0"
+ dependencies = [
+  "brush-process",
+  "brush-render",
++ "brush-serde",
+  "burn",
+  "console_error_panic_hook",
+  "getrandom 0.3.4",
+  "getrandom 0.4.3",
++ "glam",
+  "log",
+  "rrfd",
+  "serde",
+diff --git a/apps/brush-js/Cargo.toml b/apps/brush-js/Cargo.toml
+index 3ea1ab3..2b33793 100644
+--- a/apps/brush-js/Cargo.toml
++++ b/apps/brush-js/Cargo.toml
+@@ -12,6 +12,8 @@ crate-type = ["cdylib", "rlib"]
+ [dependencies]
+ brush-process.path = "../../crates/brush-process"
+ brush-render.path = "../../crates/brush-render"
++brush-serde.path = "../../crates/brush-serde"
++glam.workspace = true
+ rrfd.path = "../../crates/rrfd"
+ 
+ burn.workspace = true
+diff --git a/apps/brush-js/src/lib.rs b/apps/brush-js/src/lib.rs
+index 4ef4cd9..a71927e 100644
+--- a/apps/brush-js/src/lib.rs
++++ b/apps/brush-js/src/lib.rs
+@@ -10,7 +10,9 @@ use brush_process::{
+ };
+ use brush_render::gaussian_splats::Splats;
+ use serde::Serialize;
++use std::cell::Cell;
+ use std::pin::Pin;
++use std::rc::Rc;
+ use tokio::sync::Mutex;
+ use tokio_stream::StreamExt;
+ use wasm_bindgen::prelude::*;
+@@ -245,6 +247,8 @@ impl BrushApp {
+         LOGGER_INIT.call_once(|| {
+             wasm_logger::init(wasm_logger::Config::new(log::Level::Info));
+         });
++        run_static_constructors();
++        configure_cubecl();
+         Self {
+             device_override: None,
+         }
+@@ -305,13 +309,22 @@ impl BrushApp {
+         let source = DataSource::PickedDirectory(dir, display_name);
+ 
+         let device = self.device_override.clone().unwrap_or_else(default_device);
++        let units_per_meter = Rc::new(Cell::new(1.0));
++        let units = units_per_meter.clone();
+         let process = create_process_with_device(source, device, async move |init| {
+-            bridge_config_callback(config_fn, init).await
++            let config = bridge_config_callback(config_fn, init).await;
++            if let Some(c) = &config {
++                units.set(c.load_config.units_per_meter);
++            }
++            config
+         });
+ 
+         Training {
+             stream: Mutex::new(process.stream),
+             splat_view: process.splat_view,
++            units_per_meter,
++            up_axis: Cell::new(None),
++            finished: Cell::new(false),
+         }
+     }
+ }
+@@ -322,6 +335,12 @@ impl BrushApp {
+ pub struct Training {
+     stream: Mutex<Pin<Box<dyn ProcessStream>>>,
+     splat_view: Slot<Splats>,
++    /// Dataset units per metre from the final config; exports multiply back.
++    units_per_meter: Rc<Cell<f32>>,
++    /// Last up axis reported by `SplatsUpdated`, written into the ply header.
++    up_axis: Cell<Option<glam::Vec3>>,
++    /// The stream returned `None`; polling it again panics.
++    finished: Cell<bool>,
+ }
+ 
+ #[wasm_bindgen]
+@@ -344,11 +363,20 @@ impl Training {
+     pub async fn train_steps(&self, steps: u32) -> Result<Vec<BrushMessage>, JsValue> {
+         let mut stream = self.stream.lock().await;
+         let mut out: Vec<BrushMessage> = Vec::new();
++        if self.finished.get() {
++            return Ok(out);
++        }
+         let mut steps_taken: u32 = 0;
+         loop {
+             match stream.next().await {
+                 Some(Ok(ProcessMessage::TrainMessage(TrainMessage::TrainConfig { .. }))) => {}
+                 Some(Ok(msg)) => {
++                    if let ProcessMessage::SplatsUpdated {
++                        up_axis: Some(up), ..
++                    } = &msg
++                    {
++                        self.up_axis.set(Some(*up));
++                    }
+                     let is_step = matches!(
+                         &msg,
+                         ProcessMessage::TrainMessage(TrainMessage::TrainStep { .. })
+@@ -361,8 +389,14 @@ impl Training {
+                         }
+                     }
+                 }
+-                Some(Err(e)) => return Err(js_err_str(&format!("{e:#}"))),
+-                None => return Ok(out),
++                Some(Err(e)) => {
++                    self.finished.set(true);
++                    return Err(js_err_str(&format!("{e:#}")));
++                }
++                None => {
++                    self.finished.set(true);
++                    return Ok(out);
++                }
+             }
+         }
+     }
+@@ -373,6 +407,21 @@ impl Training {
+     pub fn current_splats(&self) -> Option<BrushSplats> {
+         self.splat_view.latest().map(|inner| BrushSplats { inner })
+     }
++
++    /// Serialize the current splats as a binary `.ply`, exactly as the native
++    /// Brush export does (min-scale floor baked in, dataset units restored).
++    /// Resolves to `null` if no splats have been produced yet.
++    #[wasm_bindgen(js_name = exportPly)]
++    pub async fn export_ply(&self) -> Result<Option<js_sys::Uint8Array>, JsValue> {
++        let Some(splats) = self.splat_view.latest() else {
++            return Ok(None);
++        };
++        let splats = splats.scaled(self.units_per_meter.get());
++        let bytes = brush_serde::splat_to_ply(splats, self.up_axis.get())
++            .await
++            .map_err(|e| js_err_str(&format!("{e:#}")))?;
++        Ok(Some(js_sys::Uint8Array::from(bytes.as_slice())))
++    }
+ }
+ 
+ /// Round-trip the initial `TrainStreamConfig` through a JS async callback.
+@@ -449,6 +498,32 @@ fn tensor_buffer_js<const D: usize>(tensor: burn::tensor::Tensor<D>) -> Option<J
+         .map(|w| JsValue::from(w.clone()))
+ }
+ 
++unsafe extern "C" {
++    fn __wasm_call_ctors();
++}
++
++/// Run the static constructors (cubecl's `inventory` registrations) once.
++/// Referencing `__wasm_call_ctors` makes wasm-ld link a "reactor": otherwise
++/// it treats the cdylib as a "command" and wraps every export (even
++/// malloc/free) to re-run all of them on each JS→wasm call — thousands of
++/// constructors per WebGPU callback, ~50x slower training.
++fn run_static_constructors() {
++    static ONCE: std::sync::Once = std::sync::Once::new();
++    // SAFETY: called once, before anything reads the inventory registries.
++    ONCE.call_once(|| unsafe { __wasm_call_ctors() });
++}
++
++/// Autotune at `Full`: burn-cubecl then registers no roofline bounds. At the
++/// other levels the bounds measure peak throughput with a blocking device
++/// sync (`cubecl_std::throughput`), which panics on wasm on the first reduce.
++/// `try_set` keeps a config the host may already have installed.
++fn configure_cubecl() {
++    use burn::cubecl::config::{CubeClRuntimeConfig, RuntimeConfig, autotune::AutotuneLevel};
++    let mut config = CubeClRuntimeConfig::default();
++    config.autotune.level = AutotuneLevel::Full;
++    let _ = CubeClRuntimeConfig::try_set(config);
++}
++
+ fn js_err_str(s: &str) -> JsValue {
+     JsValue::from_str(s)
+ }

@@ -1,0 +1,605 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 2e64c9d..c914a0c 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1044,13 +1044,19 @@ dependencies = [
+  "anyhow",
+  "brush-async",
+  "brush-process",
++ "brush-render",
++ "brush-serde",
++ "burn",
+  "clap",
+  "env_logger",
+  "getrandom 0.4.3",
++ "glam",
+  "humantime",
+  "indicatif",
+  "indicatif-log-bridge",
+  "log",
++ "serde",
++ "serde_json",
+  "tokio",
+  "tokio-stream",
+  "tracing",
+diff --git a/apps/brush-cli/Cargo.toml b/apps/brush-cli/Cargo.toml
+index a480574..2995004 100644
+--- a/apps/brush-cli/Cargo.toml
++++ b/apps/brush-cli/Cargo.toml
+@@ -13,6 +13,12 @@ path = "src/main.rs"
+ [dependencies]
+ brush-async.path = "../../crates/brush-async"
+ brush-process.path = "../../crates/brush-process"
++brush-render.path = "../../crates/brush-render"
++brush-serde.path = "../../crates/brush-serde"
++burn.workspace = true
++glam.workspace = true
++serde.workspace = true
++serde_json = { workspace = true, features = ["std"] }
+ 
+ indicatif.workspace = true
+ indicatif-log-bridge = "0.2"
+diff --git a/apps/brush-cli/src/gausify.rs b/apps/brush-cli/src/gausify.rs
+new file mode 100644
+index 0000000..1f8c654
+--- /dev/null
++++ b/apps/brush-cli/src/gausify.rs
+@@ -0,0 +1,370 @@
++//! Gausify additions to brush-cli (`brush/patches/gausify-cli.patch` in
++//! gausify-comfyui):
++//!
++//! - machine-readable progress: every line starting with `GAUSIFY ` on stdout
++//!   is one JSON object (see [`emit`]);
++//! - `brush-cli render`: renders a `.ply` from a list of COLMAP cameras with
++//!   exactly the code of gausify-orbit's brush-js `Training.renderColor`
++//!   (render.patch) and `Training.renderDepth` (geom.patch), and writes the
++//!   results as `.npy` files.
++
++use std::io::Write;
++use std::path::{Path, PathBuf};
++
++use anyhow::Context;
++use brush_process::DataSource;
++use brush_process::config::TrainStreamConfig;
++use brush_render::camera::{Camera, focal_to_fov};
++use brush_render::gaussian_splats::{SplatRenderMode, Splats};
++use brush_render::kernels::camera_model::CameraModel;
++use brush_render::{TextureMode, render_splats};
++use burn::module::{Param, ParamId};
++use burn::tensor::Tensor;
++use clap::Parser;
++use serde::Deserialize;
++
++/// The training source, for the `done` line's `ply` path (set by `build_process`).
++pub static SOURCE: std::sync::OnceLock<DataSource> = std::sync::OnceLock::new();
++
++/// Print one `GAUSIFY {json}` line on stdout and flush it right away (the
++/// parent process reads the pipe line by line).
++pub fn emit(value: &serde_json::Value) {
++    let mut out = std::io::stdout().lock();
++    let _ = writeln!(out, "GAUSIFY {value}");
++    let _ = out.flush();
++}
++
++/// Where `train_stream`'s final export lands (same resolution as
++/// `brush_process::train_stream`: `{dataset}` interpolation, relative to the
++/// dataset's parent directory, `{iter}` zero-padded to the digits of the total
++/// step count). `None` for non-directory sources or LOD runs.
++pub fn final_ply_path(source: &DataSource, config: &TrainStreamConfig) -> Option<PathBuf> {
++    let DataSource::Path(path) = source else {
++        return None;
++    };
++    let base = Path::new(path);
++    if !base.is_dir() || config.train_config.lod_levels > 0 {
++        return None;
++    }
++    let dataset_name = base.file_name().map_or_else(
++        || "dataset".to_owned(),
++        |s| s.to_string_lossy().into_owned(),
++    );
++    let export_path_str = config
++        .process_config
++        .export_path
++        .replace("{dataset}", &dataset_name);
++    let parent = base
++        .parent()
++        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
++    let export_path: PathBuf = parent.join(export_path_str).components().collect();
++    let total = config.train_config.total_train_iters;
++    let digits = ((total as f64).log10().floor() as usize) + 1;
++    let name = config
++        .process_config
++        .export_name
++        .replace("{iter}", &format!("{total:0digits$}"));
++    Some(export_path.join(name))
++}
++
++#[derive(Parser)]
++#[command(
++    name = "brush-cli render",
++    about = "Render a splat .ply from COLMAP cameras into .npy files (Gausify)",
++    long_about = "Render a splat .ply from COLMAP cameras into .npy files (Gausify).\n\n\
++        --cameras is a JSON list of {\"R\": [[3x3]] world->camera rotation, \"t\": [3], \
++        \"f\" (or \"fx\"/\"fy\"), \"cx\", \"cy\", \"width\", \"height\"} (COLMAP/OpenCV \
++        convention, pixels, the ply's units).\n\
++        For camera i (5 digits) it writes into --out-dir:\n  \
++        i.rgba.npy  (H,W,4) float32: [r,g,b,alpha] over a black background \
++        (colour premultiplied), = brush-js renderColor\n  \
++        i.depth.npy (H,W) float32: expected camera-space z (0 where alpha <= 1e-4), \
++        = brush-js renderDepth\n  \
++        i.alpha.npy (H,W) float32: accumulated alpha of the depth pass"
++)]
++pub struct RenderCli {
++    /// Splat .ply to render (e.g. a Brush export).
++    #[arg(long)]
++    pub ply: PathBuf,
++    /// JSON file with the list of cameras.
++    #[arg(long)]
++    pub cameras: PathBuf,
++    /// Output directory (created if missing).
++    #[arg(long)]
++    pub out_dir: PathBuf,
++    /// Skip the colour render (no .rgba.npy).
++    #[arg(long, default_value = "false")]
++    pub no_color: bool,
++    /// Skip the depth render (no .depth.npy / .alpha.npy).
++    #[arg(long, default_value = "false")]
++    pub no_depth: bool,
++}
++
++#[derive(Deserialize)]
++struct CameraSpec {
++    #[serde(rename = "R")]
++    r: [[f64; 3]; 3],
++    t: [f64; 3],
++    #[serde(default)]
++    f: Option<f64>,
++    #[serde(default)]
++    fx: Option<f64>,
++    #[serde(default)]
++    fy: Option<f64>,
++    cx: f64,
++    cy: f64,
++    width: u32,
++    height: u32,
++}
++
++/// Camera centre and camera-to-world quaternion of a world->camera pose, as
++/// gausify-orbit's `brushCamera` (web/src/posecheck/job.ts) computes them.
++fn brush_pose(spec: &CameraSpec) -> (glam::Vec3, glam::Quat) {
++    let rows = spec.r.map(glam::DVec3::from_array);
++    // from_cols(rows of R) = Rᵀ = camera-to-world rotation.
++    let r_t = glam::DMat3::from_cols(rows[0], rows[1], rows[2]);
++    let center = -(r_t * glam::DVec3::from_array(spec.t));
++    let q = glam::DQuat::from_mat3(&r_t);
++    let rot = glam::Quat::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32).normalize();
++    (center.as_vec3(), rot)
++}
++
++#[allow(clippy::too_many_arguments)]
++fn pinhole(
++    pos: glam::Vec3,
++    rot: glam::Quat,
++    fx: f32,
++    fy: f32,
++    cx: f32,
++    cy: f32,
++    w: u32,
++    h: u32,
++) -> Camera {
++    Camera::new(
++        pos,
++        rot,
++        focal_to_fov(fx as f64, w, &CameraModel::Pinhole),
++        focal_to_fov(fy as f64, h, &CameraModel::Pinhole),
++        glam::vec2(cx / w as f32, cy / h as f32),
++        CameraModel::Pinhole,
++    )
++}
++
++async fn render_rgba(splats: Splats, camera: &Camera, w: u32, h: u32) -> anyhow::Result<Vec<f32>> {
++    // render.patch `renderColor`.
++    let (img, _) = render_splats(
++        splats,
++        camera,
++        glam::uvec2(w, h),
++        glam::Vec3::ZERO,
++        None,
++        TextureMode::Float,
++    )
++    .await;
++    img.into_data_async()
++        .await
++        .map_err(|e| anyhow::anyhow!("{e:?}"))?
++        .try_into_vec::<f32>()
++        .map_err(|e| anyhow::anyhow!("{e:?}"))
++}
++
++/// geom.patch `renderDepth`: interleaved `[z, alpha]` per pixel.
++async fn render_depth(
++    splats: Splats,
++    pos: glam::Vec3,
++    rot: glam::Quat,
++    camera: &Camera,
++    w: u32,
++    h: u32,
++) -> anyhow::Result<Vec<f32>> {
++    let forward = rot * glam::Vec3::Z;
++
++    let means = splats.means();
++    let device = means.device();
++    let n = means.dims()[0];
++    let p = Tensor::<1>::from_floats([pos.x, pos.y, pos.z], &device).reshape([1, 3]);
++    let f = Tensor::<1>::from_floats([forward.x, forward.y, forward.z], &device).reshape([3, 1]);
++    let z = (means - p).matmul(f); // [N, 1]
++    // Colours are clamped to ±100 and floored at 0 in the rasterizer:
++    // normalise the depth into that range and scale it back after.
++    let z_max = z
++        .clone()
++        .max()
++        .into_scalar_async::<f32>()
++        .await
++        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
++    let scale = (z_max / 50.0).max(1e-6);
++    const SH_C0: f32 = 0.282_094_8;
++    let feature = Tensor::cat(vec![z / scale, Tensor::zeros([n, 2], &device)], 1);
++    let dc = ((feature - 0.5) / SH_C0).reshape([n, 1, 3]);
++    let depth_splats = Splats {
++        transforms: splats.transforms.clone(),
++        sh_coeffs: Param::initialized(ParamId::new(), dc),
++        raw_opacities: splats.raw_opacities.clone(),
++        render_mip: splats.render_mip,
++        min_scale: splats.min_scale.clone(),
++    };
++    let data = render_rgba(depth_splats, camera, w, h).await?;
++    let mut out = vec![0f32; (w * h * 2) as usize];
++    for (px, o) in data.chunks_exact(4).zip(out.chunks_exact_mut(2)) {
++        let a = px[3];
++        o[0] = if a > 1e-4 { px[0] / a * scale } else { 0.0 };
++        o[1] = a;
++    }
++    Ok(out)
++}
++
++/// Minimal `.npy` (format 1.0, little-endian float32, C order) writer.
++pub fn write_npy(path: &Path, shape: &[usize], data: &[f32]) -> anyhow::Result<()> {
++    anyhow::ensure!(
++        shape.iter().product::<usize>() == data.len(),
++        "npy shape {shape:?} does not match {} values",
++        data.len()
++    );
++    let dims: Vec<String> = shape.iter().map(|d| d.to_string()).collect();
++    let shape_str = if dims.len() == 1 {
++        format!("({},)", dims[0])
++    } else {
++        format!("({})", dims.join(", "))
++    };
++    let mut header = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': {shape_str}, }}");
++    // magic (6) + version (2) + header length (2) + header, padded to 64 with a final '\n'.
++    let total = 10 + header.len() + 1;
++    header.push_str(&" ".repeat((64 - total % 64) % 64));
++    header.push('\n');
++    let mut bytes = Vec::with_capacity(10 + header.len() + data.len() * 4);
++    bytes.extend_from_slice(b"\x93NUMPY\x01\x00");
++    bytes.extend_from_slice(&(header.len() as u16).to_le_bytes());
++    bytes.extend_from_slice(header.as_bytes());
++    for v in data {
++        bytes.extend_from_slice(&v.to_le_bytes());
++    }
++    let tmp = path.with_extension("npy.tmp");
++    std::fs::write(&tmp, &bytes).with_context(|| format!("Writing {}", tmp.display()))?;
++    std::fs::rename(&tmp, path).with_context(|| format!("Writing {}", path.display()))?;
++    Ok(())
++}
++
++/// `brush-cli render`.
++pub async fn run_render(args: RenderCli) -> anyhow::Result<()> {
++    let cams: Vec<CameraSpec> = serde_json::from_slice(
++        &std::fs::read(&args.cameras)
++            .with_context(|| format!("Reading {}", args.cameras.display()))?,
++    )
++    .with_context(|| format!("Parsing cameras {}", args.cameras.display()))?;
++    std::fs::create_dir_all(&args.out_dir)
++        .with_context(|| format!("Creating {}", args.out_dir.display()))?;
++
++    let device = brush_process::burn_init_setup().await;
++    let bytes =
++        std::fs::read(&args.ply).with_context(|| format!("Reading {}", args.ply.display()))?;
++    let msg = brush_serde::load_splat_from_ply(&bytes[..], None)
++        .await
++        .with_context(|| format!("Loading {}", args.ply.display()))?;
++    drop(bytes);
++    let mode = msg.meta.render_mode.unwrap_or(SplatRenderMode::Default);
++    let splats = msg.data.into_splats(&device, mode);
++    emit(&serde_json::json!({
++        "event": "loaded",
++        "splats": splats.num_splats(),
++        "cameras": cams.len(),
++    }));
++
++    for (i, cam) in cams.iter().enumerate() {
++        let fx = cam.fx.or(cam.f).context("camera needs \"f\" or \"fx\"")?;
++        let fy = cam.fy.or(cam.f).unwrap_or(fx);
++        let (w, h) = (cam.width, cam.height);
++        anyhow::ensure!(w > 0 && h > 0, "camera {i}: empty image size");
++        let (pos, rot) = brush_pose(cam);
++        let camera = pinhole(
++            pos,
++            rot,
++            fx as f32,
++            fy as f32,
++            cam.cx as f32,
++            cam.cy as f32,
++            w,
++            h,
++        );
++        let (wu, hu) = (w as usize, h as usize);
++        if !args.no_color {
++            let rgba = render_rgba(splats.clone(), &camera, w, h).await?;
++            write_npy(
++                &args.out_dir.join(format!("{i:05}.rgba.npy")),
++                &[hu, wu, 4],
++                &rgba,
++            )?;
++        }
++        if !args.no_depth {
++            let za = render_depth(splats.clone(), pos, rot, &camera, w, h).await?;
++            let depth: Vec<f32> = za.iter().step_by(2).copied().collect();
++            let alpha: Vec<f32> = za.iter().skip(1).step_by(2).copied().collect();
++            write_npy(
++                &args.out_dir.join(format!("{i:05}.depth.npy")),
++                &[hu, wu],
++                &depth,
++            )?;
++            write_npy(
++                &args.out_dir.join(format!("{i:05}.alpha.npy")),
++                &[hu, wu],
++                &alpha,
++            )?;
++        }
++        emit(&serde_json::json!({"event": "render", "index": i, "total": cams.len()}));
++    }
++    emit(&serde_json::json!({"event": "done", "cameras": cams.len()}));
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn npy_header_is_aligned() {
++        let dir = std::env::temp_dir().join(format!("gausify-npy-{}", std::process::id()));
++        std::fs::create_dir_all(&dir).unwrap();
++        let path = dir.join("a.npy");
++        write_npy(&path, &[2, 3], &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]).unwrap();
++        let bytes = std::fs::read(&path).unwrap();
++        assert_eq!(&bytes[..8], b"\x93NUMPY\x01\x00");
++        let hlen = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
++        assert_eq!((10 + hlen) % 64, 0);
++        assert_eq!(bytes.len(), 10 + hlen + 24);
++        let _ = std::fs::remove_dir_all(dir);
++    }
++
++    #[test]
++    fn identity_pose() {
++        let spec = CameraSpec {
++            r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
++            t: [0.0, 0.0, 2.0],
++            f: Some(100.0),
++            fx: None,
++            fy: None,
++            cx: 50.0,
++            cy: 50.0,
++            width: 100,
++            height: 100,
++        };
++        let (pos, rot) = brush_pose(&spec);
++        assert!((pos - glam::vec3(0.0, 0.0, -2.0)).length() < 1e-6);
++        assert!(rot.angle_between(glam::Quat::IDENTITY) < 1e-6);
++    }
++
++    #[test]
++    fn parses_render_args() {
++        let a = RenderCli::try_parse_from([
++            "render",
++            "--ply",
++            "a.ply",
++            "--cameras",
++            "c.json",
++            "--out-dir",
++            "o",
++            "--no-color",
++        ])
++        .unwrap();
++        assert!(a.no_color && !a.no_depth);
++    }
++}
+diff --git a/apps/brush-cli/src/lib.rs b/apps/brush-cli/src/lib.rs
+index f6b4b1c..df3c705 100644
+--- a/apps/brush-cli/src/lib.rs
++++ b/apps/brush-cli/src/lib.rs
+@@ -9,6 +9,8 @@ use brush_process::create_process;
+ use brush_process::message::ProcessMessage;
+ use brush_process::message::TrainMessage;
+ 
++pub mod gausify;
++
+ use clap::{Error, Parser, builder::ArgPredicate, error::ErrorKind};
+ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+ use indicatif_log_bridge::LogWrapper;
+@@ -22,7 +24,9 @@ use tracing::trace_span;
+     author,
+     version,
+     arg_required_else_help = false,
+-    about = "Brush - universal splats"
++    about = "Brush - universal splats",
++    after_help = "Gausify: progress is printed as `GAUSIFY {json}` lines on stdout; \
++        `brush-cli render --help` renders a .ply from COLMAP cameras."
+ )]
+ pub struct Cli {
+     /// Source to load from (path or URL).
+@@ -57,6 +61,7 @@ impl Cli {
+ /// given. Shared by the standalone CLI binary and brush-app's headless path.
+ pub fn build_process(args: &Cli) -> Option<RunningProcess> {
+     let source = args.source.clone()?;
++    let _ = gausify::SOURCE.set(source.clone());
+     let cli_config = args.train_stream.clone();
+     Some(create_process(source, async move |init| {
+         Some(brush_process::args_file::merge_configs(&init, &cli_config))
+@@ -188,6 +193,13 @@ pub async fn run_cli_ui(
+     #[allow(unused_mut)]
+     let mut duration = Duration::from_secs(0);
+     let mut eval_every = train_stream_config.process_config.eval_every;
++    // Gausify progress state.
++    let mut final_config: Option<Box<TrainStreamConfig>> = None;
++    let mut total_iters = train_stream_config.train_config.total_iters();
++    let mut last_iter = 0u32;
++    let mut last_splats: Option<u32> = None;
++    let mut last_psnr: Option<f32> = None;
++    let mut last_ssim: Option<f32> = None;
+ 
+     while let Some(msg) = messages.recv().await {
+         let _span = trace_span!("CLI UI").entered();
+@@ -197,6 +209,9 @@ pub async fn run_cli_ui(
+             Err(error) => {
+                 // Don't print the error here. It'll bubble up and be printed as output.
+                 let _ = sp.println("❌ Encountered an error");
++                gausify::emit(
++                    &serde_json::json!({"event": "error", "message": format!("{error:#}")}),
++                );
+                 return Err(error);
+             }
+         };
+@@ -213,11 +228,21 @@ pub async fn run_cli_ui(
+                 }
+                 main_spinner.set_message(format!("Loading {name}..."));
+             }
+-            ProcessMessage::SplatsUpdated { .. } => {}
++            ProcessMessage::SplatsUpdated { num_splats, .. } => {
++                last_splats = Some(num_splats);
++            }
+             ProcessMessage::TrainMessage(train) => match train {
+                 TrainMessage::TrainConfig { config } => {
+                     train_progress.set_length(config.train_config.total_iters() as u64);
+                     eval_every = config.process_config.eval_every;
++                    total_iters = config.train_config.total_iters();
++                    gausify::emit(&serde_json::json!({
++                        "event": "config",
++                        "total": total_iters,
++                        "export_every": config.process_config.export_every,
++                        "eval_every": eval_every,
++                    }));
++                    final_config = Some(config);
+                 }
+                 TrainMessage::Dataset { dataset } => {
+                     let train_views = dataset.train.views.len();
+@@ -225,6 +250,9 @@ pub async fn run_cli_ui(
+                     log::info!(
+                         "Loaded dataset with {train_views} training, {eval_views} eval views",
+                     );
++                    gausify::emit(&serde_json::json!({
++                        "event": "dataset", "train": train_views, "eval": eval_views,
++                    }));
+                     main_spinner.set_message(format!(
+                         "Loading dataset with {train_views} training, {eval_views} eval views",
+                     ));
+@@ -249,6 +277,14 @@ pub async fn run_cli_ui(
+                     }
+                     train_progress.set_position(iter as u64);
+                     duration = total_elapsed;
++                    last_iter = iter;
++                    gausify::emit(&serde_json::json!({
++                        "event": "step",
++                        "iter": iter,
++                        "total": total_iters,
++                        "splats": last_splats,
++                        "seconds": total_elapsed.as_secs_f64(),
++                    }));
+                 }
+                 TrainMessage::RefineStep {
+                     cur_splat_count,
+@@ -257,6 +293,9 @@ pub async fn run_cli_ui(
+                 } => {
+                     stats_spinner.set_message(format!("Current splat count {cur_splat_count}"));
+                     log::info!("Refine iter {iter}, {cur_splat_count} splats.");
++                    gausify::emit(&serde_json::json!({
++                        "event": "refine", "iter": iter, "splats": cur_splat_count,
++                    }));
+                 }
+                 TrainMessage::EvalResult {
+                     iter,
+@@ -264,6 +303,11 @@ pub async fn run_cli_ui(
+                     avg_ssim,
+                 } => {
+                     log::info!("Eval iter {iter}: PSNR {avg_psnr}, ssim {avg_ssim}");
++                    last_psnr = Some(avg_psnr);
++                    last_ssim = Some(avg_ssim);
++                    gausify::emit(&serde_json::json!({
++                        "event": "eval", "iter": iter, "psnr": avg_psnr, "ssim": avg_ssim,
++                    }));
+ 
+                     eval_spinner.set_message(format!(
+                         "Eval iter {iter}: PSNR {avg_psnr}, ssim {avg_ssim}"
+@@ -279,6 +323,9 @@ pub async fn run_cli_ui(
+             ProcessMessage::Warning { error } => {
+                 // Alternate form prints the whole anyhow context chain.
+                 log::warn!("{error:#}");
++                gausify::emit(
++                    &serde_json::json!({"event": "warning", "message": format!("{error:#}")}),
++                );
+                 sp.println(format!("⚠️: {error:#}"))?;
+             }
+             #[allow(unreachable_patterns)]
+@@ -286,6 +333,22 @@ pub async fn run_cli_ui(
+         }
+     }
+ 
++    let ply = final_config.as_ref().and_then(|config| {
++        gausify::SOURCE
++            .get()
++            .and_then(|source| gausify::final_ply_path(source, config))
++    });
++    gausify::emit(&serde_json::json!({
++        "event": "done",
++        "iter": last_iter,
++        "total": total_iters,
++        "splats": last_splats,
++        "psnr": last_psnr,
++        "ssim": last_ssim,
++        "ply": ply.map(|p| p.to_string_lossy().into_owned()),
++        "seconds": duration.as_secs_f64(),
++    }));
++
+     let duration_secs = Duration::from_secs(duration.as_secs());
+     let _ = sp.println(format!(
+         "Training took {}",
+diff --git a/apps/brush-cli/src/main.rs b/apps/brush-cli/src/main.rs
+index a3e9567..d52aade 100644
+--- a/apps/brush-cli/src/main.rs
++++ b/apps/brush-cli/src/main.rs
+@@ -7,6 +7,24 @@ fn main() -> anyhow::Result<()> {
+     use brush_cli::{Cli, build_process, run_headless};
+     use clap::Parser;
+ 
++    // Gausify: `brush-cli render ...` (the positional source can't be a
++    // subcommand without changing how `brush-cli <PATH>` parses).
++    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
++    if argv.get(1).is_some_and(|a| a == "render") {
++        let render_args = brush_cli::gausify::RenderCli::parse_from(
++            std::iter::once(std::ffi::OsString::from("brush-cli render"))
++                .chain(argv.into_iter().skip(2)),
++        );
++        let _ = env_logger::builder()
++            .target(env_logger::Target::Stderr)
++            .try_init();
++        let runtime = tokio::runtime::Builder::new_multi_thread()
++            .enable_all()
++            .build()
++            .expect("Failed to initialize tokio runtime");
++        return runtime.block_on(brush_cli::gausify::run_render(render_args));
++    }
++
+     let args = Cli::parse().validate()?;
+ 
+     if args.with_viewer {

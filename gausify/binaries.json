@@ -1,0 +1,29 @@
+{
+  "brush-cli": {
+    "version": "0.1.0",
+    "source": "https://github.com/ArthurBrussee/brush@38185dedaf8143988a31a64c1f27c2323b1febdf + brush/patches (built by .github/workflows/build-brush.yml)",
+    "platforms": {
+      "linux-x64": {
+        "url": "https://github.com/michael-mueller-git/gausify-comfyui/releases/download/brush-v{version}/brush-cli-{version}-linux-x64.tar.xz",
+        "sha256": null,
+        "exe": "brush-cli"
+      },
+      "windows-x64": {
+        "url": "https://github.com/michael-mueller-git/gausify-comfyui/releases/download/brush-v{version}/brush-cli-{version}-windows-x64.zip",
+        "sha256": null,
+        "exe": "brush-cli.exe"
+      }
+    }
+  },
+  "colmap-windows": {
+    "version": "4.2.1",
+    "source": "official COLMAP release (CUDA build)",
+    "platforms": {
+      "windows-x64": {
+        "url": "https://github.com/colmap/colmap/releases/download/{version}/colmap-x64-windows-cuda.zip",
+        "sha256": "e9c5cbd84c2ea986d2e970a2473fc2d2e6b34a2cdcf5d3df2765c319a63af881",
+        "exe": "bin/colmap.exe"
+      }
+    }
+  }
+}

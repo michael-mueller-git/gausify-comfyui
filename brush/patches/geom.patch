@@ -1,0 +1,562 @@
+diff --git a/apps/brush-js/src/lib.rs b/apps/brush-js/src/lib.rs
+index ae74e6b..42193a3 100644
+--- a/apps/brush-js/src/lib.rs
++++ b/apps/brush-js/src/lib.rs
+@@ -435,6 +435,105 @@ impl Training {
+     }
+ }
+ 
++#[wasm_bindgen]
++impl Training {
++    /// Expected depth (camera-space z, dataset units) and accumulated alpha of
++    /// the current splats seen from a pinhole camera, as interleaved
++    /// `[z, alpha]` per pixel, row-major. `rotation` is the camera-to-world
++    /// quaternion `[x, y, z, w]` (OpenCV axes: x right, y down, z forward),
++    /// `position` the camera centre. Resolves to `null` before any splats exist.
++    ///
++    /// Brush's own rasterizer does the compositing: each splat's depth is
++    /// rendered as a degree-0 SH colour, so `Σ wᵢ zᵢ` comes back in the red
++    /// channel and `Σ wᵢ` in alpha.
++    #[allow(clippy::too_many_arguments)]
++    #[wasm_bindgen(js_name = renderDepth)]
++    pub async fn render_depth(
++        &self,
++        position: Vec<f32>,
++        rotation: Vec<f32>,
++        fx: f32,
++        fy: f32,
++        cx: f32,
++        cy: f32,
++        width: u32,
++        height: u32,
++    ) -> Result<Option<js_sys::Float32Array>, JsValue> {
++        use brush_render::camera::{Camera, focal_to_fov};
++        use brush_render::kernels::camera_model::CameraModel;
++        use brush_render::{TextureMode, render_splats};
++        use burn::module::{Param, ParamId};
++        use burn::tensor::Tensor;
++
++        if position.len() != 3 || rotation.len() != 4 {
++            return Err(js_err_str("renderDepth: position needs 3 values and rotation 4"));
++        }
++        let Some(splats) = self.splat_view.latest() else {
++            return Ok(None);
++        };
++        let splats = splats.scaled(self.units_per_meter.get());
++        let pos = glam::Vec3::new(position[0], position[1], position[2]);
++        let rot = glam::Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]).normalize();
++        let forward = rot * glam::Vec3::Z;
++
++        let means = splats.means();
++        let device = means.device();
++        let n = means.dims()[0];
++        let p = Tensor::<1>::from_floats([pos.x, pos.y, pos.z], &device).reshape([1, 3]);
++        let f = Tensor::<1>::from_floats([forward.x, forward.y, forward.z], &device).reshape([3, 1]);
++        let z = (means - p).matmul(f); // [N, 1]
++        // Colours are clamped to ±100 and floored at 0 in the rasterizer:
++        // normalise the depth into that range and scale it back after.
++        let z_max = z
++            .clone()
++            .max()
++            .into_scalar_async::<f32>()
++            .await
++            .map_err(|e| js_err_str(&format!("{e:?}")))?;
++        let scale = (z_max / 50.0).max(1e-6);
++        const SH_C0: f32 = 0.282_094_8;
++        let feature = Tensor::cat(vec![z / scale, Tensor::zeros([n, 2], &device)], 1);
++        let dc = ((feature - 0.5) / SH_C0).reshape([n, 1, 3]);
++        let depth_splats = Splats {
++            transforms: splats.transforms.clone(),
++            sh_coeffs: Param::initialized(ParamId::new(), dc),
++            raw_opacities: splats.raw_opacities.clone(),
++            render_mip: splats.render_mip,
++            min_scale: splats.min_scale.clone(),
++        };
++        let camera = Camera::new(
++            pos,
++            rot,
++            focal_to_fov(fx as f64, width, &CameraModel::Pinhole),
++            focal_to_fov(fy as f64, height, &CameraModel::Pinhole),
++            glam::vec2(cx / width as f32, cy / height as f32),
++            CameraModel::Pinhole,
++        );
++        let (img, _) = render_splats(
++            depth_splats,
++            &camera,
++            glam::uvec2(width, height),
++            glam::Vec3::ZERO,
++            None,
++            TextureMode::Float,
++        )
++        .await;
++        let data = img
++            .into_data_async()
++            .await
++            .map_err(|e| js_err_str(&format!("{e:?}")))?
++            .try_into_vec::<f32>()
++            .map_err(|e| js_err_str(&format!("{e:?}")))?;
++        let mut out = vec![0f32; (width * height * 2) as usize];
++        for (px, o) in data.chunks_exact(4).zip(out.chunks_exact_mut(2)) {
++            let a = px[3];
++            o[0] = if a > 1e-4 { px[0] / a * scale } else { 0.0 };
++            o[1] = a;
++        }
++        Ok(Some(js_sys::Float32Array::from(out.as_slice())))
++    }
++}
++
+ /// Round-trip the initial `TrainStreamConfig` through a JS async callback.
+ /// Returns `None` to signal "user cancelled" — the JS callback can throw,
+ /// reject the promise, or explicitly return `null` / `undefined` to abort
+diff --git a/crates/brush-train/src/config.rs b/crates/brush-train/src/config.rs
+index 2e4e1e9..f152779 100644
+--- a/crates/brush-train/src/config.rs
++++ b/crates/brush-train/src/config.rs
+@@ -144,6 +144,50 @@ pub struct TrainConfig {
+     #[arg(long, help_heading = "Training options", default_value = "0.0")]
+     pub volume_reg_weight: f32,
+ 
++    /// Flatten regulariser (PGSR): weight of the mean smallest scale of the
++    /// visible splats, in units of the scene's median size. Turns splats into
++    /// disks whose shortest axis is a surface normal. 0 disables.
++    #[arg(long, help_heading = "Training options", default_value = "0.0")]
++    pub flatten_weight: f32,
++
++    /// Depth distortion (2DGS): weight of `Σᵢⱼ wᵢwⱼ(zᵢ - zⱼ)²` per pixel,
++    /// depths normalised by the camera's distance to the scene centre. Costs
++    /// one extra render per step. 0 disables.
++    #[arg(long, help_heading = "Training options", default_value = "0.0")]
++    pub depth_distortion_weight: f32,
++
++    /// Normal consistency (2DGS): weight of `1 - n·N` between rendered splat
++    /// normals and normals of the rendered depth. Costs one extra render per
++    /// step (two without depth distortion). 0 disables.
++    #[arg(long, help_heading = "Training options", default_value = "0.0")]
++    pub normal_consistency_weight: f32,
++
++    /// Fraction of training after which depth distortion and normal
++    /// consistency kick in (2DGS: distortion at 3k/30k, normals at 7k/30k).
++    #[arg(long, help_heading = "Training options", default_value = "0.25")]
++    pub geom_reg_start: f32,
++
++    /// Fraction of training after which depth distortion and normal
++    /// consistency switch off again, so the last steps can recover fine
++    /// photometric detail. 1 keeps them to the end.
++    #[arg(long, help_heading = "Training options", default_value = "1.0")]
++    pub geom_reg_end: f32,
++
++    /// Render the depth/normal passes at 1/N of the training resolution
++    /// (cost of the geometric losses scales with pixels). 1 = full.
++    #[arg(long, help_heading = "Training options", default_value = "1")]
++    pub geom_reg_downscale: u32,
++
++    /// Apply depth distortion and normal consistency every N steps only.
++    #[arg(long, help_heading = "Training options", default_value = "1")]
++    pub geom_reg_every: u32,
++
++    /// Render the depth/normal passes only inside the bounding box of the
++    /// image's alpha mask (plus a margin), when the dataset has one. The
++    /// subject is often a small part of the frame.
++    #[arg(long, help_heading = "Training options", default_value = "true", action = clap::ArgAction::Set)]
++    pub geom_reg_crop: bool,
++
+     /// Base background color (R,G,B) used during training.
+     #[arg(
+         long,
+diff --git a/crates/brush-train/src/geom.rs b/crates/brush-train/src/geom.rs
+new file mode 100644
+index 0000000..5f754fe
+--- /dev/null
++++ b/crates/brush-train/src/geom.rs
+@@ -0,0 +1,297 @@
++//! Geometric regularisers for mesh extraction (2DGS / PGSR style), built on
++//! the existing rasterizer: per-splat camera-space normals and depths are
++//! rendered as degree-0 SH "colors", so their gradients reach means and
++//! rotations through autodiff without any kernel changes.
++//!
++//! - Flatten: mean smallest scale of the visible splats, pushing them
++//!   towards disks with a well-defined normal (the shortest axis).
++//! - Depth distortion (2DGS eq. 13 with linear depth): per pixel
++//!   `Σᵢⱼ wᵢwⱼ(zᵢ - zⱼ)² = 2(A·M₂ - M₁²)`, from the rendered `z` and `z²`
++//!   channels. Concentrates each ray's weight on one surface.
++//! - Normal consistency (2DGS eq. 14): `1 - n·N`, between the rendered splat
++//!   normal `n` and the normal `N` of the surface implied by the rendered
++//!   depth (finite differences of the back-projected depth map).
++
++use brush_render::bwd::render_splats;
++use brush_render::camera::{Camera, focal_to_fov};
++use brush_render::gaussian_splats::Splats;
++use burn::module::{Param, ParamId};
++use burn::tensor::{Tensor, TensorData, s};
++
++/// `[x0, y0, x1, y1)` of the pixels with alpha > 0 in a packed `[H, W]`
++/// RGBA-u8 image (alpha in the high byte). Host-side, so no GPU sync.
++pub fn alpha_bbox(img: &TensorData, w: usize, h: usize) -> Option<[u32; 4]> {
++    let px = img.as_slice::<u32>().ok()?;
++    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
++    for y in 0..h {
++        let row = &px[y * w..(y + 1) * w];
++        let Some(first) = row.iter().position(|p| p >> 24 != 0) else {
++            continue;
++        };
++        let last = row.iter().rposition(|p| p >> 24 != 0).unwrap_or(first);
++        x0 = x0.min(first);
++        x1 = x1.max(last + 1);
++        y0 = y0.min(y);
++        y1 = y + 1;
++    }
++    (x1 > x0).then_some([x0 as u32, y0 as u32, x1 as u32, y1 as u32])
++}
++
++/// Camera and image size for the sub-rectangle `bbox` of a `full`-sized
++/// render: same focal length, principal point shifted into the crop.
++pub fn crop_camera(camera: &Camera, full: glam::UVec2, bbox: [u32; 4]) -> (Camera, glam::UVec2) {
++    let focal = camera.focal(full);
++    let center = camera.center(full);
++    let size = glam::uvec2(bbox[2] - bbox[0], bbox[3] - bbox[1]);
++    let cam = Camera {
++        fov_x: focal_to_fov(focal.x as f64, size.x, &camera.camera_model),
++        fov_y: focal_to_fov(focal.y as f64, size.y, &camera.camera_model),
++        center_uv: glam::vec2(
++            (center.x - bbox[0] as f32) / size.x as f32,
++            (center.y - bbox[1] as f32) / size.y as f32,
++        ),
++        ..*camera
++    };
++    (cam, size)
++}
++
++const SH_C0: f32 = 0.282_094_8;
++
++/// Splat normals in camera space (shortest scale axis, flipped to face the
++/// camera) and camera-space positions.
++fn camera_space(splats: &Splats, camera: &Camera) -> (Tensor<2>, Tensor<2>) {
++    let device = splats.device();
++    let transforms = splats.transforms.val();
++    let n = transforms.dims()[0];
++    let means = transforms.clone().slice(s![.., 0..3]);
++    let q = transforms.clone().slice(s![.., 3..7]);
++    let q = q.clone() / (q.powi_scalar(2).sum_dim(1) + 1e-12).sqrt();
++    let w = q.clone().slice(s![.., 0..1]);
++    let x = q.clone().slice(s![.., 1..2]);
++    let y = q.clone().slice(s![.., 2..3]);
++    let z = q.slice(s![.., 3..4]);
++    let one = || Tensor::<2>::ones([n, 1], &device);
++    // Rotation matrix columns (local scale axes in world space).
++    let c0 = Tensor::cat(
++        vec![
++            one() - (y.clone() * y.clone() + z.clone() * z.clone()) * 2.0,
++            (x.clone() * y.clone() + w.clone() * z.clone()) * 2.0,
++            (x.clone() * z.clone() - w.clone() * y.clone()) * 2.0,
++        ],
++        1,
++    );
++    let c1 = Tensor::cat(
++        vec![
++            (x.clone() * y.clone() - w.clone() * z.clone()) * 2.0,
++            one() - (x.clone() * x.clone() + z.clone() * z.clone()) * 2.0,
++            (y.clone() * z.clone() + w.clone() * x.clone()) * 2.0,
++        ],
++        1,
++    );
++    let c2 = Tensor::cat(
++        vec![
++            (x.clone() * z.clone() + w.clone() * y.clone()) * 2.0,
++            (y.clone() * z.clone() - w.clone() * x.clone()) * 2.0,
++            one() - (x.clone() * x + y.clone() * y) * 2.0,
++        ],
++        1,
++    );
++    let axis = splats.log_scales().detach().argmin(1); // [N, 1]
++    let pick = |k: i32| axis.clone().equal_elem(k).float();
++    let normal = c0 * pick(0) + c1 * pick(1) + c2 * pick(2);
++
++    let w2c = camera.world_to_local();
++    let m = w2c.matrix3.to_cols_array(); // column-major
++    // Row-vector convention: p_cam = p_world · Rᵀ + t, so pass Rᵀ = rows of the
++    // column-major array.
++    let rt = Tensor::<2>::from_data(TensorData::new(m.to_vec(), [3, 3]), &device);
++    let t = w2c.translation;
++    let t = Tensor::<2>::from_data(TensorData::new(vec![t.x, t.y, t.z], [1, 3]), &device);
++    let means_c = means.matmul(rt.clone()) + t;
++    let normal_c = normal.matmul(rt);
++    // Face the camera (normal · position < 0); the flip is not differentiated.
++    let facing = (normal_c.clone() * means_c.clone()).sum_dim(1).detach();
++    let flip = facing.clone().sign().neg() + facing.equal_elem(0.0).float();
++    (normal_c * flip, means_c)
++}
++
++/// Render per-splat features (≥ 0, three channels) with zero background.
++/// Returns `[H, W, 4]`: Σ wᵢ fᵢ and the accumulated alpha.
++async fn render_features(
++    splats: &Splats,
++    features: Tensor<2>,
++    camera: &Camera,
++    img_size: glam::UVec2,
++) -> Tensor<3> {
++    let n = features.dims()[0];
++    // color = C0·dc + 0.5  ⇒  dc = (f - 0.5) / C0
++    let dc = ((features - 0.5) / SH_C0).reshape([n, 1, 3]);
++    let feat = Splats {
++        transforms: splats.transforms.clone(),
++        sh_coeffs: Param::initialized(ParamId::new(), dc),
++        raw_opacities: splats.raw_opacities.clone(),
++        render_mip: splats.render_mip,
++        min_scale: splats.min_scale.clone(),
++    };
++    render_splats(feat, camera, img_size, glam::Vec3::ZERO)
++        .await
++        .img
++}
++
++pub struct GeomLoss {
++    pub distortion: Option<Tensor<1>>,
++    pub normal: Option<Tensor<1>>,
++}
++
++/// Depth distortion and normal consistency for one view. `depth_scale`
++/// normalises depths to ~1 so the distortion weight is scene independent.
++pub async fn geometry_losses(
++    splats: &Splats,
++    camera: &Camera,
++    img_size: glam::UVec2,
++    depth_scale: f32,
++    want_distortion: bool,
++    want_normal: bool,
++) -> GeomLoss {
++    let device = splats.device();
++    let (normal_c, means_c) = camera_space(splats, camera);
++    let n = means_c.dims()[0];
++    let zn = means_c.slice(s![.., 2..3]).clamp_min(1e-4) / depth_scale;
++
++    let [h, w] = [img_size.y as usize, img_size.x as usize];
++    // Depth distortion needs z and z²; normal consistency needs z and the
++    // normal. With both, that is two passes: (z, z², –) and n. With normals
++    // only, one pass carries (nx, ny, z) and nz is rebuilt from the blended
++    // normal's length (exact where a pixel's splats agree; facing the camera
++    // means nz < 0).
++    let one_pass = want_normal && !want_distortion;
++    let first = if one_pass {
++        Tensor::cat(vec![normal_c.clone().slice(s![.., 0..2]) * 0.5 + 0.5, zn.clone()], 1)
++    } else {
++        Tensor::cat(vec![zn.clone(), zn.clone().powi_scalar(2), Tensor::zeros([n, 1], &device)], 1)
++    };
++    let img = render_features(splats, first, camera, img_size).await;
++    let acc = img.clone().slice(s![.., .., 3..4]).reshape([h, w]);
++    let m1 = if one_pass {
++        img.clone().slice(s![.., .., 2..3]).reshape([h, w])
++    } else {
++        img.clone().slice(s![.., .., 0..1]).reshape([h, w])
++    };
++
++    let distortion = want_distortion.then(|| {
++        let m2 = img.clone().slice(s![.., .., 1..2]).reshape([h, w]);
++        ((acc.clone() * m2 - m1.clone().powi_scalar(2)) * 2.0)
++            .clamp_min(0.0)
++            .mean()
++    });
++
++    let normal = if want_normal {
++        // Σ wᵢ(nᵢ/2 + 1/2) = (Σ wᵢnᵢ)/2 + A/2
++        let a3 = acc.clone().reshape([h, w, 1]);
++        let n_sum = if one_pass {
++            let nxy = img.slice(s![.., .., 0..2]) * 2.0 - a3.clone();
++            let nz = -(a3.powi_scalar(2) - nxy.clone().powi_scalar(2).sum_dim(2))
++                .clamp_min(0.0)
++                .add_scalar(1e-8)
++                .sqrt();
++            Tensor::cat(vec![nxy, nz], 2)
++        } else {
++            let nimg = render_features(splats, normal_c * 0.5 + 0.5, camera, img_size).await;
++            nimg.slice(s![.., .., 0..3]) * 2.0 - a3
++        };
++        let n_r = n_sum.clone() / (n_sum.powi_scalar(2).sum_dim(2) + 1e-8).sqrt();
++
++        // Back-project the expected depth.
++        let focal = camera.focal(img_size);
++        let center = camera.center(img_size);
++        let depth = m1 / acc.clone().clamp_min(1e-4) * depth_scale;
++        let us: Vec<f32> = (0..w).map(|i| (i as f32 + 0.5 - center.x) / focal.x).collect();
++        let vs: Vec<f32> = (0..h).map(|j| (j as f32 + 0.5 - center.y) / focal.y).collect();
++        let u = Tensor::<2>::from_data(TensorData::new(us, [1, w]), &device);
++        let v = Tensor::<2>::from_data(TensorData::new(vs, [h, 1]), &device);
++        let px = depth.clone() * u;
++        let py = depth.clone() * v;
++        let p = Tensor::stack::<3>(vec![px, py, depth], 2); // [H, W, 3]
++        let du = p.clone().slice(s![1..h - 1, 2..w, ..]) - p.clone().slice(s![1..h - 1, 0..w - 2, ..]);
++        let dv = p.clone().slice(s![2..h, 1..w - 1, ..]) - p.slice(s![0..h - 2, 1..w - 1, ..]);
++        let c = |t: &Tensor<3>, i: usize| t.clone().slice(s![.., .., i..i + 1]);
++        let cross = Tensor::cat(
++            vec![
++                c(&du, 1) * c(&dv, 2) - c(&du, 2) * c(&dv, 1),
++                c(&du, 2) * c(&dv, 0) - c(&du, 0) * c(&dv, 2),
++                c(&du, 0) * c(&dv, 1) - c(&du, 1) * c(&dv, 0),
++            ],
++            2,
++        );
++        // x right, y down, z forward: du × dv points away from the camera.
++        let n_d = -cross.clone() / (cross.powi_scalar(2).sum_dim(2) + 1e-20).sqrt();
++        let n_r = n_r.slice(s![1..h - 1, 1..w - 1, ..]);
++        let valid = acc
++            .slice(s![1..h - 1, 1..w - 1])
++            .detach()
++            .greater_elem(0.5)
++            .float()
++            .reshape([h - 2, w - 2, 1]);
++        let cos = (n_r * n_d).sum_dim(2);
++        let count = valid.clone().sum().clamp_min(1.0);
++        Some(((-cos + 1.0) * valid).sum() / count)
++    } else {
++        None
++    };
++
++    GeomLoss { distortion, normal }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use brush_render::{
++        TextureMode,
++        camera::Camera,
++        gaussian_splats::{SplatRenderMode, Splats, render_splats},
++        kernels::camera_model::CameraModel,
++    };
++    use burn::tensor::Distribution;
++    use wasm_bindgen_test::wasm_bindgen_test;
++
++    async fn to_vec(t: Tensor<3>) -> Vec<f32> {
++        t.into_data_async().await.expect("readback").try_into_vec::<f32>().expect("f32")
++    }
++
++    /// A crop rendered through `crop_camera` must match the same rectangle of
++    /// the full render (same focal, shifted principal point).
++    #[wasm_bindgen_test(unsupported = tokio::test)]
++    async fn crop_matches_full_render() {
++        let device: burn::tensor::Device = brush_cube::test_helpers::test_device().await.into();
++        let n = 400;
++        let means = Tensor::<2>::random([n, 3], Distribution::Uniform(-1.0, 1.0), &device)
++            + Tensor::<2>::from_floats([[0.0, 0.0, 4.0]], &device);
++        let log_scales = Tensor::<2>::random([n, 3], Distribution::Uniform(-3.5, -2.0), &device);
++        let quats = Tensor::<2>::random([n, 4], Distribution::Normal(0.0, 1.0), &device);
++        let sh = Tensor::<3>::random([n, 1, 3], Distribution::Uniform(-1.0, 1.0), &device);
++        let opac = Tensor::<1>::random([n], Distribution::Uniform(-1.0, 3.0), &device);
++        let splats = Splats::from_tensor_data(means, quats, log_scales, sh, opac, SplatRenderMode::Default);
++        let cam = Camera::new(
++            glam::Vec3::ZERO,
++            glam::Quat::IDENTITY,
++            0.9,
++            0.7,
++            glam::vec2(0.47, 0.53),
++            CameraModel::Pinhole,
++        );
++        let full = glam::uvec2(96, 72);
++        let bbox = [21u32, 13, 77, 59];
++        let (full_img, _) =
++            render_splats(splats.clone(), &cam, full, glam::Vec3::ZERO, None, TextureMode::Float).await;
++        let (ccam, csize) = crop_camera(&cam, full, bbox);
++        assert_eq!(csize, glam::uvec2(56, 46));
++        let (crop_img, _) =
++            render_splats(splats, &ccam, csize, glam::Vec3::ZERO, None, TextureMode::Float).await;
++        let expect = to_vec(full_img.slice(s![13..59, 21..77, ..])).await;
++        let got = to_vec(crop_img).await;
++        let max_err = expect.iter().zip(&got).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
++        let mean_px = expect.iter().sum::<f32>() / expect.len() as f32;
++        assert!(mean_px > 0.01, "scene should cover the crop (mean {mean_px})");
++        assert!(max_err < 2e-3, "crop differs from the full render by {max_err}");
++    }
++}
+diff --git a/crates/brush-train/src/lib.rs b/crates/brush-train/src/lib.rs
+index b388faa..caa3ec5 100644
+--- a/crates/brush-train/src/lib.rs
++++ b/crates/brush-train/src/lib.rs
+@@ -7,6 +7,7 @@ pub mod msg;
+ pub mod train;
+ 
+ mod adam_scaled;
++mod geom;
+ mod multinomial;
+ mod quat_vec;
+ mod stats;
+diff --git a/crates/brush-train/src/train.rs b/crates/brush-train/src/train.rs
+index 6ebec46..567aca1 100644
+--- a/crates/brush-train/src/train.rs
++++ b/crates/brush-train/src/train.rs
+@@ -211,6 +211,17 @@ impl SplatTrainer {
+         // backend so it doesn't inherit the autodiff device's residual
+         // checkpointing flag (the LPIPS `unpack_gt_rgb` path, via
+         // `unwrap_wgpu_int`, expects a clean Wgpu tensor).
++        // Geometric losses this step? If so, find the subject's box on the
++        // host copy of the image before it moves to the GPU.
++        let geom_progress = self.step_count as f32 / self.config.total_train_iters.max(1) as f32;
++        let geom_step = (self.config.depth_distortion_weight > 0.0
++            || self.config.normal_consistency_weight > 0.0)
++            && geom_progress >= self.config.geom_reg_start
++            && geom_progress < self.config.geom_reg_end
++            && self.step_count % self.config.geom_reg_every.max(1) == 0;
++        let mask_bbox = (geom_step && has_alpha && self.config.geom_reg_crop)
++            .then(|| crate::geom::alpha_bbox(&batch.img_packed, img_w, img_h))
++            .flatten();
+         let gt_packed: Tensor<2, Int> =
+             Tensor::from_data(batch.img_packed, &device.clone().inner());
+         let img_size = glam::uvec2(img_w as u32, img_h as u32);
+@@ -318,6 +329,59 @@ impl SplatTrainer {
+                 }
+             }
+ 
++            if self.config.flatten_weight > 0.0 {
++                let vis = visible.clone().autodiff();
++                let n_vis = vis.clone().sum().clamp_min(1.0);
++                let smallest = splats.log_scales().min_dim(1).squeeze_dim::<1>(1).exp()
++                    / median_scale.max(1e-6);
++                loss = loss + (smallest * vis).sum() / n_vis * self.config.flatten_weight;
++            }
++
++            let (w_dist, w_normal) = (
++                self.config.depth_distortion_weight,
++                self.config.normal_consistency_weight,
++            );
++            if geom_step {
++                let depth_scale = (camera.position - self.bounds.center).length().max(1e-6);
++                // Same camera (fov-based intrinsics), fewer pixels; then only
++                // the subject's box (+ margin) when there is a mask.
++                let ds = self.config.geom_reg_downscale.max(1);
++                let full = (img_size / ds).max(glam::uvec2(8, 8));
++                let (geom_cam, geom_size) = match mask_bbox {
++                    Some([x0, y0, x1, y1]) => {
++                        const MARGIN: u32 = 8;
++                        let b = [
++                            (x0 / ds).saturating_sub(MARGIN),
++                            (y0 / ds).saturating_sub(MARGIN),
++                            (x1.div_ceil(ds) + MARGIN).min(full.x),
++                            (y1.div_ceil(ds) + MARGIN).min(full.y),
++                        ];
++                        if b[2] >= b[0] + 8 && b[3] >= b[1] + 8 {
++                            crate::geom::crop_camera(&camera, full, b)
++                        } else {
++                            (camera, full)
++                        }
++                    }
++                    None => (camera, full),
++                };
++                let geom = crate::geom::geometry_losses(
++                    &splats,
++                    &geom_cam,
++                    geom_size,
++                    depth_scale,
++                    w_dist > 0.0,
++                    w_normal > 0.0,
++                )
++                .instrument(trace_span!("Geometry losses"))
++                .await;
++                if let Some(d) = geom.distortion {
++                    loss = loss + d * w_dist;
++                }
++                if let Some(n) = geom.normal {
++                    loss = loss + n * w_normal;
++                }
++            }
++
+             // Strip the autodiff graph off the loss so consumers can read the
+             // scalar later without keeping the backward pass alive.
+             let loss_inner = loss.clone().inner();

@@ -1,0 +1,181 @@
+import hashlib
+import http.server
+import io
+import json
+import logging
+import os
+import tarfile
+import threading
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from gausify import downloader
+
+
+class _Handler(http.server.SimpleHTTPRequestHandler):
+    hits: dict = {}
+
+    def do_GET(self):  # noqa: N802
+        _Handler.hits[self.path] = _Handler.hits.get(self.path, 0) + 1
+        super().do_GET()
+
+    def log_message(self, *a):
+        pass
+
+
+@pytest.fixture
+def server(tmp_path):
+    root = tmp_path / "www"
+    root.mkdir()
+    _Handler.hits = {}
+    handler = lambda *a, **k: _Handler(*a, directory=str(root), **k)  # noqa: E731
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    yield root, f"http://127.0.0.1:{httpd.server_address[1]}"
+    httpd.shutdown()
+    httpd.server_close()
+
+
+@pytest.fixture(autouse=True)
+def env(tmp_path, monkeypatch):
+    monkeypatch.setenv("GAUSIFY_BIN_DIR", str(tmp_path / "bin"))
+    monkeypatch.delenv("GAUSIFY_FAKE_TOOL", raising=False)
+    monkeypatch.setattr(downloader, "platform_key", lambda: "linux-x64")
+
+
+def _tar_xz(path: Path, files: dict[str, bytes]):
+    with tarfile.open(path, "w:xz") as t:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mode = 0o644
+            t.addfile(info, io.BytesIO(data))
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _zip(path: Path, files: dict[str, bytes]):
+    with zipfile.ZipFile(path, "w") as z:
+        for name, data in files.items():
+            z.writestr(name, data)
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _manifest(url, sha, exe="fake-tool", plat="linux-x64"):
+    return {"fake-tool": {"version": "1.2.3", "platforms": {plat: {"url": url, "sha256": sha, "exe": exe}}}}
+
+
+def test_download_verify_extract(server, tmp_path):
+    root, base = server
+    sha = _tar_xz(root / "fake-tool-1.2.3.tar.xz", {"fake-tool": b"#!/bin/sh\necho hi\n", "LICENSE": b"x"})
+    m = _manifest(base + "/fake-tool-{version}.tar.xz", sha)
+    exe = downloader.ensure_binary("fake-tool", manifest=m)
+    assert exe.read_bytes().startswith(b"#!/bin/sh")
+    assert exe.parent == tmp_path / "bin" / "fake-tool" / "1.2.3-linux-x64"
+    if os.name != "nt":
+        assert os.access(exe, os.X_OK)
+    # Cached: no second request.
+    assert downloader.ensure_binary("fake-tool", manifest=m) == exe
+    assert _Handler.hits == {"/fake-tool-1.2.3.tar.xz": 1}
+    # No temp dirs left behind.
+    assert sorted(p.name for p in exe.parent.parent.iterdir() if not p.name.endswith(".lock")) == ["1.2.3-linux-x64"]
+
+
+def test_sha_mismatch(server, tmp_path):
+    root, base = server
+    _tar_xz(root / "a.tar.xz", {"fake-tool": b"x"})
+    with pytest.raises(ValueError, match="sha256 mismatch"):
+        downloader.ensure_binary("fake-tool", manifest=_manifest(base + "/a.tar.xz", "0" * 64))
+    assert not (tmp_path / "bin" / "fake-tool" / "1.2.3-linux-x64").exists()
+
+
+def test_null_sha_warns(server, caplog):
+    root, base = server
+    _tar_xz(root / "a.tar.xz", {"fake-tool": b"x"})
+    with caplog.at_level(logging.WARNING, logger="gausify.downloader"):
+        exe = downloader.ensure_binary("fake-tool", manifest=_manifest(base + "/a.tar.xz", None))
+    assert exe.is_file()
+    assert "not verified" in caplog.text
+
+
+def test_zip_nested_exe(server, monkeypatch):
+    monkeypatch.setattr(downloader, "platform_key", lambda: "windows-x64")
+    root, base = server
+    sha = _zip(root / "c.zip", {"bin/colmap.exe": b"MZ", "COLMAP.bat": b"@echo"})
+    exe = downloader.ensure_binary(
+        "fake-tool", manifest=_manifest(base + "/c.zip", sha, "bin/colmap.exe", "windows-x64")
+    )
+    assert exe.name == "colmap.exe" and exe.read_bytes() == b"MZ"
+
+
+def test_missing_exe_in_archive(server):
+    root, base = server
+    sha = _tar_xz(root / "a.tar.xz", {"other": b"x"})
+    with pytest.raises(FileNotFoundError):
+        downloader.ensure_binary("fake-tool", manifest=_manifest(base + "/a.tar.xz", sha))
+
+
+def test_path_traversal_rejected(server):
+    root, base = server
+    sha = _zip(root / "evil.zip", {"../evil": b"x", "fake-tool": b"x"})
+    with pytest.raises(ValueError, match="escapes"):
+        downloader.ensure_binary("fake-tool", manifest=_manifest(base + "/evil.zip", sha))
+
+
+def test_concurrent_single_download(server):
+    root, base = server
+    sha = _tar_xz(root / "a.tar.xz", {"fake-tool": os.urandom(3 << 20)})
+    m = _manifest(base + "/a.tar.xz", sha)
+    results, errors = [], []
+
+    def worker():
+        try:
+            results.append(downloader.ensure_binary("fake-tool", manifest=m))
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    assert len(set(results)) == 1
+    assert _Handler.hits == {"/a.tar.xz": 1}
+
+
+def test_env_override(tmp_path, monkeypatch):
+    exe = tmp_path / "my-tool"
+    exe.write_text("x")
+    monkeypatch.setenv("GAUSIFY_FAKE_TOOL", str(exe))
+    assert downloader.ensure_binary("fake-tool", manifest={}) == exe
+    monkeypatch.setenv("GAUSIFY_FAKE_TOOL", str(tmp_path / "missing"))
+    with pytest.raises(FileNotFoundError):
+        downloader.ensure_binary("fake-tool", manifest={})
+
+
+def test_unsupported_platform(monkeypatch):
+    monkeypatch.setattr(downloader, "platform_key", lambda: "macos-arm64")
+    with pytest.raises(RuntimeError, match="not available"):
+        downloader.ensure_binary("fake-tool", manifest=_manifest("http://x/a.tar.xz", None))
+
+
+def test_bin_dir_default(monkeypatch):
+    monkeypatch.delenv("GAUSIFY_BIN_DIR")
+    d = downloader.bin_dir()
+    assert d.parts[-2:] == ("gausify", "bin")
+
+
+def test_manifest_shape():
+    m = downloader.load_manifest()
+    assert set(m) >= {"brush-cli", "colmap-windows"}
+    assert set(m["brush-cli"]["platforms"]) == {"linux-x64", "windows-x64"}
+    for entry in m.values():
+        for p in entry["platforms"].values():
+            assert p["url"].startswith("https://") and p["exe"]
+            assert p["sha256"] is None or len(p["sha256"]) == 64
+    colmap = m["colmap-windows"]["platforms"]["windows-x64"]
+    assert colmap["url"].format(version=m["colmap-windows"]["version"]).endswith("/4.2.1/colmap-x64-windows-cuda.zip")
+    json.dumps(m)

@@ -1,0 +1,830 @@
+diff --git a/apps/brush-js/src/lib.rs b/apps/brush-js/src/lib.rs
+index a71927e..ae74e6b 100644
+--- a/apps/brush-js/src/lib.rs
++++ b/apps/brush-js/src/lib.rs
+@@ -85,6 +85,17 @@ impl BrushMessage {
+         }
+     }
+ 
++    /// Splats pruned at this refine for a negative render-loss contribution.
++    #[wasm_bindgen(getter, js_name = prunedHarmful)]
++    pub fn pruned_harmful(&self) -> Option<u32> {
++        match &self.inner {
++            ProcessMessage::TrainMessage(TrainMessage::RefineStep { pruned_harmful, .. }) => {
++                Some(*pruned_harmful)
++            }
++            _ => None,
++        }
++    }
++
+     #[wasm_bindgen(getter, js_name = shDegree)]
+     pub fn sh_degree(&self) -> Option<u32> {
+         match &self.inner {
+diff --git a/crates/brush-process/src/message.rs b/crates/brush-process/src/message.rs
+index 91d9d1b..b25bfde 100644
+--- a/crates/brush-process/src/message.rs
++++ b/crates/brush-process/src/message.rs
+@@ -27,6 +27,8 @@ pub enum TrainMessage {
+     RefineStep {
+         cur_splat_count: u32,
+         iter: u32,
++        /// Splats pruned for a negative render-loss contribution.
++        pruned_harmful: u32,
+     },
+     /// Eval was run successfully with these results.
+     #[allow(unused)]
+diff --git a/crates/brush-process/src/train_stream.rs b/crates/brush-process/src/train_stream.rs
+index 430c907..a687ae5 100644
+--- a/crates/brush-process/src/train_stream.rs
++++ b/crates/brush-process/src/train_stream.rs
+@@ -343,6 +343,7 @@ pub(crate) async fn train_stream(
+                 num_split_high_grad: 0,
+                 num_pruned: 0,
+                 num_pruned_non_finite: 0,
++                num_pruned_harmful: 0,
+                 total_splats: splats.num_splats(),
+             }
+         };
+@@ -470,6 +471,7 @@ pub(crate) async fn train_stream(
+                 .emit(ProcessMessage::TrainMessage(TrainMessage::RefineStep {
+                     cur_splat_count: refine.total_splats,
+                     iter,
++                    pruned_harmful: refine.num_pruned_harmful,
+                 }))
+                 .await;
+         }
+diff --git a/crates/brush-render/src/bwd/burn_glue.rs b/crates/brush-render/src/bwd/burn_glue.rs
+index e521447..3e7b9cd 100644
+--- a/crates/brush-render/src/bwd/burn_glue.rs
++++ b/crates/brush-render/src/bwd/burn_glue.rs
+@@ -187,6 +187,8 @@ pub struct SplatOutputDiff {
+     /// Per-splat max screen radius aux — on the **inner** backend (no gradients).
+     pub max_radius: Tensor<1>,
+     pub refine_weight_holder: Tensor<1>,
++    /// Inputs for [`render_contribution`] on this view.
++    pub contribution: ContributionInputs,
+ }
+ 
+ /// Render splats on a differentiable device.
+@@ -252,6 +254,7 @@ pub async fn render_splats_with_pass(
+         "render_splats_with_pass requires a Backward variant"
+     );
+ 
++    let num_points = splats.num_splats() as usize;
+     let output = <burn::backend::Dispatch as SplatOps>::render(
+         camera,
+         img_size,
+@@ -265,12 +268,24 @@ pub async fn render_splats_with_pass(
+     )
+     .await;
+ 
++    let contribution = ContributionInputs {
++        out_img: inner_float(output.out_img.clone()),
++        projected_splats: inner_float(output.projected_splats.clone()),
++        compact_gid_from_isect: inner_int(output.compact_gid_from_isect.clone()),
++        tile_offsets: inner_int(output.aux.tile_offsets.clone()),
++        global_from_compact_gid: inner_int(output.global_from_compact_gid.clone()),
++        background,
++        img_size,
++        num_points,
++    };
++
+     SplatOutputDiff {
+         img: Tensor::from_dispatch(output.out_img),
+         num_visible: output.aux.num_visible,
+         visible: Tensor::from_dispatch(output.aux.visible).without_autodiff(),
+         max_radius: Tensor::from_dispatch(output.aux.max_radius).without_autodiff(),
+         refine_weight_holder,
++        contribution,
+     }
+ }
+ 
+@@ -568,3 +583,100 @@ impl SplatBwdOps for Fusion<CubeBackend> {
+         }
+     }
+ }
++
++// ---------------------------------------------------------------------------
++// Render-loss contribution: a non-differentiable side pass over one forward
++// render (see `contribution_kernel`).
++// ---------------------------------------------------------------------------
++
++/// What the contribution pass needs from one forward render, on the inner
++/// (non-autodiff) backend.
++#[derive(Clone, Debug)]
++pub struct ContributionInputs {
++    out_img: FloatTensor<brush_cube::MainBackend>,
++    projected_splats: FloatTensor<brush_cube::MainBackend>,
++    compact_gid_from_isect: IntTensor<brush_cube::MainBackend>,
++    tile_offsets: IntTensor<brush_cube::MainBackend>,
++    global_from_compact_gid: IntTensor<brush_cube::MainBackend>,
++    background: Vec3,
++    img_size: glam::UVec2,
++    num_points: usize,
++}
++
++fn inner_kind(t: burn::backend::DispatchTensor) -> burn::backend::DispatchTensorKind {
++    match t.kind {
++        burn::backend::DispatchTensorKind::Autodiff(inner) => *inner,
++        other => other,
++    }
++}
++
++fn inner_float(t: burn::backend::DispatchTensor) -> FloatTensor<brush_cube::MainBackend> {
++    match inner_kind(t) {
++        crate::backend_kind!(burn::backend::BackendTensor::Autodiff(t)) => t.primitive,
++        crate::backend_kind!(bt) => bt.float(),
++        _ => panic!("contribution: expected a Wgpu float tensor"),
++    }
++}
++
++fn inner_int(t: burn::backend::DispatchTensor) -> IntTensor<brush_cube::MainBackend> {
++    match inner_kind(t) {
++        crate::backend_kind!(bt) => bt.int(),
++        _ => panic!("contribution: expected a Wgpu int tensor"),
++    }
++}
++
++/// Per-splat L1 render-loss contribution of one view, dense `[num_points]`
++/// on the inner backend: how much the loss would grow without each splat
++/// (negative = removing it helps). `gt_packed` is the same packed GT the
++/// loss sees; `alpha_weight` mirrors the alpha-match weight (0 when off).
++pub fn render_contribution(
++    inputs: ContributionInputs,
++    gt_packed: Tensor<2, burn::tensor::Int>,
++    alpha_weight: f32,
++    mask_by_gt_alpha: bool,
++) -> Tensor<1> {
++    let gt = crate::burn_glue::unwrap_wgpu_int(gt_packed);
++    let client = inputs.out_img.client.clone();
++    let float = |t| client.clone().resolve_tensor_float::<CubeBackend>(t);
++    let int = |t| client.clone().resolve_tensor_int::<CubeBackend>(t);
++    let contrib = super::render_bwd::contribution_cube(
++        float(inputs.out_img),
++        float(inputs.projected_splats),
++        int(inputs.compact_gid_from_isect),
++        int(inputs.tile_offsets),
++        int(inputs.global_from_compact_gid),
++        int(gt),
++        inputs.background,
++        inputs.img_size,
++        inputs.num_points,
++        alpha_weight,
++        mask_by_gt_alpha,
++    );
++
++    // Bind the eagerly computed result back into the fusion stream.
++    #[derive(Debug)]
++    struct BindOp {
++        desc: CustomOpIr,
++        contrib: FloatTensor<CubeBackend>,
++    }
++    impl Operation<FusionCubeRuntime> for BindOp {
++        fn execute(
++            &self,
++            h: &mut HandleContainer<FusionHandle<FusionCubeRuntime>>,
++        ) -> Result<(), ExecutionError> {
++            let (_, [out]) = self.desc.as_fixed::<0, 1>();
++            h.register_float_tensor::<CubeBackend>(&out.id, self.contrib.clone());
++            Ok(())
++        }
++    }
++    let out_ir = TensorIr::uninit(client.create_empty_handle(), contrib.shape(), DType::F32);
++    let desc = CustomOpIr::new("contribution_bind", &[], &[out_ir]);
++    let [out] = client
++        .register(
++            StreamId::current(),
++            OperationIr::Custom(desc.clone()),
++            BindOp { desc, contrib },
++        )
++        .outputs();
++    crate::burn_glue::wrap_wgpu_float(out)
++}
+diff --git a/crates/brush-render/src/bwd/kernels/rasterize_backwards.rs b/crates/brush-render/src/bwd/kernels/rasterize_backwards.rs
+index f0710d1..bdb8936 100644
+--- a/crates/brush-render/src/bwd/kernels/rasterize_backwards.rs
++++ b/crates/brush-render/src/bwd/kernels/rasterize_backwards.rs
+@@ -389,3 +389,178 @@ fn accumulate_grads_for_batch(
+     }
+     grad
+ }
++
++/// Per-splat render-loss contribution for one view: how much the L1 loss
++/// would grow if the splat were removed (DeG, Yan et al. 2026, §3.3 and
++/// supp. H). Positive = the splat helps this view; negative = removing it
++/// lowers the loss (floaters, ghosts that only exist to fit an inconsistent
++/// view). Exact for L1, no linearisation: removing splat `i` scales
++/// everything behind it, background included, by `1/(1-α_i)`.
++///
++/// Same tile walk as [`rasterize_backwards_kernel`] (forward-replay order,
++/// `pix_state` = colour still to come), so each thread sees its splat's
++/// transmittance and back colour per pixel. Output is dense, indexed by
++/// global splat id.
++#[cube(launch)]
++#[allow(clippy::too_many_arguments)]
++pub fn contribution_kernel<A: AtomicAddF32>(
++    compact_gid_from_isect: &Tensor<u32>,
++    tile_offsets: &Tensor<u32>,
++    projected: &Tensor<f32>,
++    output: &Tensor<f32>,
++    gt_packed: &Tensor<u32>,
++    global_from_compact_gid: &Tensor<u32>,
++    contrib: &mut Tensor<Atomic<A::Storage>>,
++    u: RasterizeUniforms,
++    alpha_weight: f32,
++    mask_by_gt_alpha: u32,
++) {
++    let (tile_id, tile_origin_x, tile_origin_y) = tile_origin(u.tile_bw);
++    let mut pix_state = Shared::new_slice((TILE_SIZE * 4u32) as usize);
++    load_pixel_state(output, u, tile_origin_x, tile_origin_y, &mut pix_state);
++    let (range_lo, range_hi) = load_range(tile_offsets, tile_id);
++    let num_splats_in_tile = range_hi - range_lo;
++    let rounds = (num_splats_in_tile + SPLAT_BATCH - 1u32) / SPLAT_BATCH;
++
++    let mut batch_idx = 0u32;
++    while batch_idx < rounds {
++        let (compact_gid, splat, splat_active) = load_splat_for_batch(
++            compact_gid_from_isect,
++            projected,
++            range_lo,
++            num_splats_in_tile,
++            batch_idx,
++        );
++        let gain = accumulate_contribution_for_batch(
++            splat,
++            splat_active,
++            tile_origin_x,
++            tile_origin_y,
++            num_splats_in_tile,
++            batch_idx,
++            &mut pix_state,
++            output,
++            gt_packed,
++            u,
++            alpha_weight,
++            mask_by_gt_alpha,
++        );
++        if splat_active {
++            let gid = global_from_compact_gid[compact_gid as usize];
++            A::add(&contrib[gid as usize], gain);
++        }
++        batch_idx += 1u32;
++    }
++}
++
++#[allow(clippy::too_many_arguments)]
++#[cube]
++fn accumulate_contribution_for_batch(
++    splat: Splat,
++    splat_active: bool,
++    tile_origin_x: u32,
++    tile_origin_y: u32,
++    num_splats_in_tile: u32,
++    batch_idx: u32,
++    pix_state: &mut Shared<[f32]>,
++    output: &Tensor<f32>,
++    gt_packed: &Tensor<u32>,
++    u: RasterizeUniforms,
++    alpha_weight: f32,
++    mask_by_gt_alpha: u32,
++) -> f32 {
++    let conic = Sym2 {
++        c00: splat.conic_x,
++        c01: splat.conic_y,
++        c11: splat.conic_z,
++    };
++    let clamped_r = max(splat.color_r, 0.0f32);
++    let clamped_g = max(splat.color_g, 0.0f32);
++    let clamped_b = max(splat.color_b, 0.0f32);
++    let inv_255 = 1.0f32 / 255.0f32;
++
++    let num_splats_this_batch = min(SPLAT_BATCH, num_splats_in_tile - batch_idx * SPLAT_BATCH);
++    let total_iters = num_splats_this_batch + TILE_SIZE - 1u32;
++
++    let mut gain = 0.0f32;
++    let mut i = 0u32;
++    while i < total_iters {
++        let active_iter = splat_active && i >= UNIT_POS && (i - UNIT_POS) < TILE_SIZE;
++
++        if active_iter {
++            let pixel_rank = i - UNIT_POS;
++            let s = (pixel_rank * 4u32) as usize;
++            let state_x = pix_state[s];
++            let state_y = pix_state[s + 1];
++            let state_z = pix_state[s + 2];
++            let state_w = pix_state[s + 3];
++
++            if state_w > 1.0e-4f32 {
++                let pix_x = tile_origin_x + pixel_rank % TILE_WIDTH;
++                let pix_y = tile_origin_y + pixel_rank / TILE_WIDTH;
++                let dx = splat.xy_x - (pix_x as f32 + 0.5f32);
++                let dy = splat.xy_y - (pix_y as f32 + 0.5f32);
++                let sigma =
++                    0.5f32 * (conic.c00 * dx * dx + conic.c11 * dy * dy) + conic.c01 * dx * dy;
++                let alpha = min(0.999f32, splat.color_a * f32::exp(-sigma));
++                // Hard cutoff, as in the production forward.
++                if sigma >= 0.0f32 && alpha >= ALPHA_CUTOFF_MID {
++                    let next_t = state_w * (1.0f32 - alpha);
++                    if next_t <= 1.0e-4f32 {
++                        pix_state[s + 3] = 0.0f32;
++                    } else {
++                        let vis = alpha * state_w;
++                        let pix_id = pix_x + pix_y * u.img_w;
++                        let pix_base = (pix_id * 4u32) as usize;
++                        let final_a = output[pix_base + 3];
++                        let t_final = 1.0f32 - final_a;
++
++                        let behind_x = state_x - vis * clamped_r;
++                        let behind_y = state_y - vis * clamped_g;
++                        let behind_z = state_z - vis * clamped_b;
++                        // Without the splat: its own colour leaves, what is
++                        // behind it (bg too) gains a factor 1/(1-α).
++                        let k = alpha / (1.0f32 - alpha);
++                        let d_x = (behind_x + t_final * u.bg_r) * k - vis * clamped_r;
++                        let d_y = (behind_y + t_final * u.bg_g) * k - vis * clamped_g;
++                        let d_z = (behind_z + t_final * u.bg_b) * k - vis * clamped_b;
++                        let d_a = -t_final * k;
++
++                        // GT is premultiplied; composite it over the same bg
++                        // as the loss (a no-op for opaque views or zero bg).
++                        let gt = gt_packed[pix_id as usize];
++                        let gt_a = f32::cast_from(gt >> 24u32) * inv_255;
++                        let gt_r = f32::cast_from(gt & 0xffu32) * inv_255 + (1.0f32 - gt_a) * u.bg_r;
++                        let gt_g =
++                            f32::cast_from((gt >> 8u32) & 0xffu32) * inv_255 + (1.0f32 - gt_a) * u.bg_g;
++                        let gt_b = f32::cast_from((gt >> 16u32) & 0xffu32) * inv_255
++                            + (1.0f32 - gt_a) * u.bg_b;
++
++                        let r_x = output[pix_base] - gt_r;
++                        let r_y = output[pix_base + 1] - gt_g;
++                        let r_z = output[pix_base + 2] - gt_b;
++                        let r_a = final_a - gt_a;
++                        let gain_rgb = (f32::abs(r_x + d_x) - f32::abs(r_x)
++                            + f32::abs(r_y + d_y)
++                            - f32::abs(r_y)
++                            + f32::abs(r_z + d_z)
++                            - f32::abs(r_z))
++                            / 3.0f32;
++                        let gain_a = f32::abs(r_a + d_a) - f32::abs(r_a);
++                        let w = select(mask_by_gt_alpha == 1u32, gt_a, 1.0f32);
++                        gain += w * gain_rgb + alpha_weight * gain_a;
++
++                        pix_state[s] = behind_x;
++                        pix_state[s + 1] = behind_y;
++                        pix_state[s + 2] = behind_z;
++                        pix_state[s + 3] = next_t;
++                    }
++                }
++            }
++        }
++
++        sync_cube();
++        i += 1u32;
++    }
++    gain
++}
+diff --git a/crates/brush-render/src/bwd/mod.rs b/crates/brush-render/src/bwd/mod.rs
+index aa4130e..9e5f626 100644
+--- a/crates/brush-render/src/bwd/mod.rs
++++ b/crates/brush-render/src/bwd/mod.rs
+@@ -8,4 +8,6 @@ pub mod burn_glue;
+ mod kernels;
+ mod render_bwd;
+ 
+-pub use burn_glue::{SplatOutputDiff, render_splats, render_splats_with_pass};
++pub use burn_glue::{
++    ContributionInputs, SplatOutputDiff, render_contribution, render_splats, render_splats_with_pass,
++};
+diff --git a/crates/brush-render/src/bwd/render_bwd.rs b/crates/brush-render/src/bwd/render_bwd.rs
+index c73fada..d55dac0 100644
+--- a/crates/brush-render/src/bwd/render_bwd.rs
++++ b/crates/brush-render/src/bwd/render_bwd.rs
+@@ -170,3 +170,85 @@ impl SplatBwdOps for CubeBackend {
+         }
+     }
+ }
++
++/// Launches [`kernels::rasterize_backwards::contribution_kernel`]: dense
++/// `[num_points]` per-splat L1 contribution for one rendered view.
++#[allow(clippy::too_many_arguments)]
++pub(crate) fn contribution_cube(
++    out_img: FloatTensor<CubeBackend>,
++    projected_splats: FloatTensor<CubeBackend>,
++    compact_gid_from_isect: IntTensor<CubeBackend>,
++    tile_offsets: IntTensor<CubeBackend>,
++    global_from_compact_gid: IntTensor<CubeBackend>,
++    gt_packed: IntTensor<CubeBackend>,
++    background: Vec3,
++    img_size: glam::UVec2,
++    num_points: usize,
++    alpha_weight: f32,
++    mask_by_gt_alpha: bool,
++) -> FloatTensor<CubeBackend> {
++    let _span = tracing::trace_span!("contribution").entered();
++    let device = out_img.device.clone();
++    let client = projected_splats.client.clone();
++    let contrib = CubeBackend::float_zeros([num_points.max(1)].into(), &device, FloatDType::F32);
++    if projected_splats.shape()[0] == 0 {
++        return contrib;
++    }
++    let gt_packed = into_contiguous(gt_packed);
++
++    let tile_bounds = uvec2(
++        img_size.x.div_ceil(crate::shaders::helpers::TILE_WIDTH),
++        img_size.y.div_ceil(crate::shaders::helpers::TILE_WIDTH),
++    );
++    let hard_floats = client
++        .properties()
++        .atomic_type_usage(Type::atomic(Type::new(ElemType::Float(FloatKind::F32))))
++        .contains(AtomicUsage::Add);
++    let cube_count = CubeCount::Static(tile_bounds.x, tile_bounds.y, 1);
++    let cube_dim = CubeDim::new_1d(kernels::rasterize_backwards::SPLAT_BATCH);
++    let uniforms = RasterizeUniformsLaunch::new(
++        tile_bounds.x,
++        img_size.x,
++        img_size.y,
++        background.x,
++        background.y,
++        background.z,
++    );
++    let mask = u32::from(mask_by_gt_alpha);
++
++    use kernels::rasterize_backwards::{CasAtomicAdd, HfAtomicAdd, contribution_kernel};
++    if hard_floats {
++        contribution_kernel::launch::<HfAtomicAdd>(
++            &client,
++            cube_count,
++            cube_dim,
++            compact_gid_from_isect.into_tensor_arg(),
++            tile_offsets.into_tensor_arg(),
++            projected_splats.into_tensor_arg(),
++            out_img.into_tensor_arg(),
++            gt_packed.into_tensor_arg(),
++            global_from_compact_gid.into_tensor_arg(),
++            contrib.clone().into_tensor_arg(),
++            uniforms,
++            alpha_weight,
++            mask,
++        );
++    } else {
++        contribution_kernel::launch::<CasAtomicAdd>(
++            &client,
++            cube_count,
++            cube_dim,
++            compact_gid_from_isect.into_tensor_arg(),
++            tile_offsets.into_tensor_arg(),
++            projected_splats.into_tensor_arg(),
++            out_img.into_tensor_arg(),
++            gt_packed.into_tensor_arg(),
++            global_from_compact_gid.into_tensor_arg(),
++            contrib.clone().into_tensor_arg(),
++            uniforms,
++            alpha_weight,
++            mask,
++        );
++    }
++    contrib
++}
+diff --git a/crates/brush-render/src/tests/mod.rs b/crates/brush-render/src/tests/mod.rs
+index d24aac4..3494c6e 100644
+--- a/crates/brush-render/src/tests/mod.rs
++++ b/crates/brush-render/src/tests/mod.rs
+@@ -868,3 +868,85 @@ async fn renders_thin_prism_fisheye() {
+     }))
+     .await;
+ }
++
++// The contribution kernel must predict, per splat, exactly how much the L1
++// (+ alpha-match) loss changes when that splat is removed and the view is
++// re-rendered.
++#[wasm_bindgen_test(unsupported = tokio::test)]
++async fn contribution_matches_removal() {
++    let cam = Camera::new(
++        glam::vec3(0.0, 0.0, -5.0),
++        glam::Quat::IDENTITY,
++        0.5,
++        0.5,
++        glam::vec2(0.5, 0.5),
++        CameraModel::Pinhole,
++    );
++    let img_size = glam::uvec2(64, 48);
++    let (w, h) = (img_size.x as usize, img_size.y as usize);
++    let device: burn::tensor::Device = brush_cube::test_helpers::test_device().await.into();
++    let bg = Vec3::new(0.2, 0.3, 0.1);
++    let alpha_weight = 0.5;
++
++    // GT: another scene on a zero background, so its RGB is premultiplied
++    // like the training GT.
++    let gt_scene = rng_scene(200, 1.0, (-3.0, -1.5), (-2.0, 1.0), 0xFACE);
++    let gt_px = render_scene(&gt_scene, &cam, img_size, &device).await;
++    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
++    let gt_packed: Vec<u32> = gt_px
++        .chunks_exact(4)
++        .map(|p| q(p[0]) | q(p[1]) << 8 | q(p[2]) << 16 | q(p[3]) << 24)
++        .collect();
++    let loss = |px: &[f32]| -> f32 {
++        px.chunks_exact(4)
++            .zip(&gt_packed)
++            .map(|(p, g)| {
++                let ch = |s: u32| ((g >> s) & 0xff) as f32 / 255.0;
++                let ga = ch(24);
++                let gt = [ch(0) + (1.0 - ga) * bg.x, ch(8) + (1.0 - ga) * bg.y, ch(16) + (1.0 - ga) * bg.z];
++                ((p[0] - gt[0]).abs() + (p[1] - gt[1]).abs() + (p[2] - gt[2]).abs()) / 3.0
++                    + alpha_weight * (p[3] - ga).abs()
++            })
++            .sum()
++    };
++    let render_bg = async |scene: &Scene| {
++        let splats = scene_to_splats(scene, &device);
++        let (out, _) = render_splats(splats, &cam, img_size, bg, None, TextureMode::Float).await;
++        read_finite(out).await
++    };
++
++    let scene = rng_scene(200, 1.0, (-3.0, -1.5), (-2.0, 1.0), 0xC0FFEE);
++    let splats = scene_to_splats(&scene, &device.clone().autodiff());
++    let out = crate::bwd::render_splats(splats, &cam, img_size, bg).await;
++    let gt_tensor = Tensor::<2, burn::tensor::Int>::from_data(
++        burn::tensor::TensorData::new(gt_packed.iter().map(|&v| v as i32).collect::<Vec<_>>(), [h, w]),
++        &device,
++    );
++    let contrib = crate::bwd::render_contribution(out.contribution, gt_tensor, alpha_weight, false)
++        .to_data_async()
++        .await
++        .expect("readback")
++        .try_into_vec::<f32>()
++        .expect("vec");
++    assert_eq!(contrib.len(), scene.len());
++
++    let full = loss(&render_bg(&scene).await);
++    // The 12 splats with the largest |contribution|, both signs.
++    let mut order: Vec<usize> = (0..scene.len()).collect();
++    order.sort_by(|&a, &b| contrib[b].abs().total_cmp(&contrib[a].abs()));
++    assert!(contrib[order[0]].abs() > 1.0, "the test scene should have splats that matter");
++    for &i in order.iter().take(12) {
++        let mut without = scene.clone();
++        without.raw_opacity[i] = -30.0;
++        let actual = loss(&render_bg(&without).await) - full;
++        let predicted = contrib[i];
++        assert!(
++            (actual - predicted).abs() <= 2e-3 + 0.01 * actual.abs(),
++            "splat {i}: removal changed the loss by {actual}, kernel predicted {predicted}",
++        );
++    }
++    assert!(
++        order.iter().take(12).any(|&i| contrib[i] < 0.0),
++        "a random scene against a random GT should have harmful splats among the checked ones",
++    );
++}
+diff --git a/crates/brush-train/src/config.rs b/crates/brush-train/src/config.rs
+index 9c1155a..2e4e1e9 100644
+--- a/crates/brush-train/src/config.rs
++++ b/crates/brush-train/src/config.rs
+@@ -104,6 +104,46 @@ pub struct TrainConfig {
+     #[arg(long, help_heading = "Refine options", default_value = "0.0")]
+     pub lpips_loss_weight: f32,
+ 
++    /// Prune splats whose render-loss contribution, summed over the views of
++    /// the last refine window, is negative: removing them would lower the L1
++    /// loss (floaters, ghosts fitting one inconsistent view). Only splats
++    /// that contributed to at least this many views are judged. 0 disables
++    /// the contribution pass entirely.
++    #[arg(long, help_heading = "Refine options", default_value = "0")]
++    pub contrib_prune_min_views: u32,
++
++    /// How clearly harmful a splat must be: pruned only when its net
++    /// contribution is below `-ratio` times the sum of its absolute
++    /// per-view contributions (0 = any net loss, 1 = harmful in every view).
++    #[arg(long, help_heading = "Refine options", default_value = "0.2")]
++    pub contrib_prune_ratio: f32,
++
++    /// Fraction of training before contribution pruning starts: early on the
++    /// scene is unconverged and most splats still "hurt" on their way to the
++    /// right colour.
++    #[arg(long, help_heading = "Refine options", default_value = "0.2")]
++    pub contrib_prune_start: f32,
++
++    /// Opacity regulariser (DeG, Yan et al. 2026, eq. 18): weight of the mean
++    /// `1 - α` over the splats visible this step. Pushes splats towards
++    /// opaque, so semi-transparent fog either becomes a surface or gets
++    /// moved/shrunk by the photometric loss. 0 disables.
++    #[arg(long, help_heading = "Training options", default_value = "0.0")]
++    pub opac_solid_weight: f32,
++
++    /// Weight of the mean `α (1 - α)` over visible splats: pushes opacity to
++    /// 0 or 1 (low ones die and get pruned/relocated, high ones become
++    /// opaque). 0 disables.
++    #[arg(long, help_heading = "Training options", default_value = "0.0")]
++    pub opac_binary_weight: f32,
++
++    /// Volume regulariser (DeG eq. 18, made scale-free): weight of the mean
++    /// geometric-mean scale of visible splats, in units of the scene's
++    /// median size. Keeps primitives compact, so big blobs fitting grazing
++    /// views don't smear across unseen angles. 0 disables.
++    #[arg(long, help_heading = "Training options", default_value = "0.0")]
++    pub volume_reg_weight: f32,
++
+     /// Base background color (R,G,B) used during training.
+     #[arg(
+         long,
+diff --git a/crates/brush-train/src/msg.rs b/crates/brush-train/src/msg.rs
+index 2286295..2b34079 100644
+--- a/crates/brush-train/src/msg.rs
++++ b/crates/brush-train/src/msg.rs
+@@ -10,6 +10,8 @@ pub struct RefineStats {
+     pub num_pruned: u32,
+     /// Subset of `num_pruned` whose params went non-finite (NaN/Inf).
+     pub num_pruned_non_finite: u32,
++    /// Subset of `num_pruned` with a negative render-loss contribution.
++    pub num_pruned_harmful: u32,
+     pub total_splats: u32,
+ }
+ 
+diff --git a/crates/brush-train/src/stats.rs b/crates/brush-train/src/stats.rs
+index 5bde099..24afbab 100644
+--- a/crates/brush-train/src/stats.rs
++++ b/crates/brush-train/src/stats.rs
+@@ -10,6 +10,12 @@ pub(crate) struct RefineRecord {
+     pub refine_weight_norm: Tensor<1>,
+     pub vis_weight: Tensor<1>,
+     pub max_screen_size: Tensor<1>,
++    /// Summed render-loss contribution over the window (negative = harmful).
++    pub contrib_net: Tensor<1>,
++    /// Sum of the absolute per-view contributions.
++    pub contrib_abs: Tensor<1>,
++    /// Views in which the splat changed the loss at all.
++    pub contrib_views: Tensor<1>,
+ }
+ 
+ impl RefineRecord {
+@@ -18,6 +24,9 @@ impl RefineRecord {
+             refine_weight_norm: Tensor::<1>::zeros([num_points as usize], device),
+             vis_weight: Tensor::<1>::zeros([num_points as usize], device),
+             max_screen_size: Tensor::<1>::zeros([num_points as usize], device),
++            contrib_net: Tensor::<1>::zeros([num_points as usize], device),
++            contrib_abs: Tensor::<1>::zeros([num_points as usize], device),
++            contrib_views: Tensor::<1>::zeros([num_points as usize], device),
+         }
+     }
+ 
+@@ -49,6 +58,24 @@ impl RefineRecord {
+         self.max_screen_size = screen_radius.max_pair(self.max_screen_size.clone());
+     }
+ 
++    pub(crate) fn gather_contribution(&mut self, contrib: Tensor<1>) {
++        let _span = trace_span!("Gather contribution").entered();
++        let abs = contrib.clone().abs();
++        self.contrib_views = self.contrib_views.clone() + abs.clone().greater_elem(1.0e-6).float();
++        self.contrib_abs = self.contrib_abs.clone() + abs;
++        self.contrib_net = self.contrib_net.clone() + contrib;
++    }
++
++    /// Splats judged in at least `min_views` views whose net contribution is
++    /// below `-ratio` times their total absolute contribution.
++    pub(crate) fn harmful(&self, min_views: u32, ratio: f32) -> Tensor<1, Bool> {
++        self.contrib_net
++            .clone()
++            .lower(self.contrib_abs.clone() * -ratio)
++            .bool_and(self.contrib_net.clone().lower_elem(0.0))
++            .bool_and(self.contrib_views.clone().greater_equal_elem(min_views as f32))
++    }
++
+     pub(crate) fn vis_mask(&self) -> Tensor<1, Bool> {
+         self.vis_weight.clone().greater_elem(0.0)
+     }
+@@ -57,7 +84,10 @@ impl RefineRecord {
+         Self {
+             refine_weight_norm: self.refine_weight_norm.select(0, indices.clone()),
+             vis_weight: self.vis_weight.clone().select(0, indices.clone()),
+-            max_screen_size: self.max_screen_size.select(0, indices),
++            max_screen_size: self.max_screen_size.select(0, indices.clone()),
++            contrib_net: self.contrib_net.select(0, indices.clone()),
++            contrib_abs: self.contrib_abs.select(0, indices.clone()),
++            contrib_views: self.contrib_views.select(0, indices),
+         }
+     }
+ }
+diff --git a/crates/brush-train/src/train.rs b/crates/brush-train/src/train.rs
+index c9e4e3f..6ebec46 100644
+--- a/crates/brush-train/src/train.rs
++++ b/crates/brush-train/src/train.rs
+@@ -11,7 +11,7 @@ use crate::{
+ };
+ use brush_dataset::scene::SceneBatch;
+ use brush_loss::{ImageLossConfig, image_loss};
+-use brush_render::bwd::render_splats;
++use brush_render::bwd::{render_contribution, render_splats};
+ use brush_render::gaussian_splats::Splats;
+ use brush_render::{AlphaMode, bounding_box::BoundingBox, sh::sh_coeffs_for_degree};
+ use burn::{
+@@ -233,6 +233,7 @@ impl SplatTrainer {
+                 .await;
+ 
+             let pred_image = diff_out.img;
++            let contribution = diff_out.contribution;
+             let refine_weight_holder = diff_out.refine_weight_holder;
+             let visible = diff_out.visible;
+             let max_radius = diff_out.max_radius;
+@@ -269,9 +270,6 @@ impl SplatTrainer {
+             };
+             let loss_map = image_loss(pred_for_loss, gt_packed.clone(), cfg);
+ 
+-            // `loss` is only reassigned by the LPIPS path below, which is
+-            // compiled out on wasm — so `mut` is unused there.
+-            #[cfg_attr(target_family = "wasm", allow(unused_mut))]
+             let mut loss = if do_alpha_match {
+                 let rgb = loss_map.clone().slice(s![.., .., 0..3]).mean();
+                 let alpha = loss_map.slice(s![.., .., 3..4]).mean();
+@@ -293,6 +291,33 @@ impl SplatTrainer {
+                     ) * self.config.lpips_loss_weight;
+             }
+ 
++            // DeG-style regularisers, over the splats this view sees (the
++            // visibility mask is data, lifted onto the autodiff device).
++            let (w_solid, w_binary, w_volume) = (
++                self.config.opac_solid_weight,
++                self.config.opac_binary_weight,
++                self.config.volume_reg_weight,
++            );
++            if w_solid > 0.0 || w_binary > 0.0 || w_volume > 0.0 {
++                let vis = visible.clone().autodiff();
++                let n_vis = vis.clone().sum().clamp_min(1.0);
++                let opac = sigmoid(splats.raw_opacities.val());
++                if w_solid > 0.0 {
++                    let term = ((-opac.clone() + 1.0) * vis.clone()).sum() / n_vis.clone();
++                    loss = loss + term * w_solid;
++                }
++                if w_binary > 0.0 {
++                    let term = (opac.clone() * (-opac + 1.0) * vis.clone()).sum() / n_vis.clone();
++                    loss = loss + term * w_binary;
++                }
++                if w_volume > 0.0 {
++                    let size = splats.log_scales().mean_dim(1).squeeze_dim::<1>(1).exp()
++                        / median_scale.max(1e-6);
++                    let term = (size * vis).sum() / n_vis;
++                    loss = loss + term * w_volume;
++                }
++            }
++
+             // Strip the autodiff graph off the loss so consumers can read the
+             // scalar later without keeping the backward pass alive.
+             let loss_inner = loss.clone().inner();
+@@ -309,6 +334,24 @@ impl SplatTrainer {
+                     .refine_record
+                     .get_or_insert_with(|| RefineRecord::new(splats.num_splats(), &device));
+                 record.gather_stats(refine_weight, visible.clone(), max_radius);
++                // Only from the window before pruning starts: before that
++                // nobody reads the accumulators.
++                let total = self.config.total_train_iters.max(1) as f32;
++                let warm = self.config.contrib_prune_start
++                    - self.config.refine_every as f32 / total;
++                if self.config.contrib_prune_min_views > 0 && self.step_count as f32 / total >= warm {
++                    let alpha_weight = if do_alpha_match {
++                        self.config.match_alpha_weight
++                    } else {
++                        0.0
++                    };
++                    record.gather_contribution(render_contribution(
++                        contribution,
++                        gt_packed.clone(),
++                        alpha_weight,
++                        masked_alpha,
++                    ));
++                }
+             });
+ 
+             (grads, visible, diff_out.num_visible, loss_inner)
+@@ -545,10 +588,25 @@ impl SplatTrainer {
+             .await
+             .expect("Failed to count non-finite splats") as u32;
+ 
+-        let prune_mask = alpha_mask
++        let mut prune_mask = alpha_mask
+             .bool_or(scale_big)
+             .bool_or(bound_mask)
+             .bool_or(non_finite_mask);
++        let mut num_pruned_harmful = 0;
++        if self.config.contrib_prune_min_views > 0 && progress >= self.config.contrib_prune_start {
++            let harmful = refiner.harmful(
++                self.config.contrib_prune_min_views,
++                self.config.contrib_prune_ratio,
++            );
++            num_pruned_harmful = harmful
++                .clone()
++                .int()
++                .sum()
++                .into_scalar_async::<i32>()
++                .await
++                .expect("Failed to count harmful splats") as u32;
++            prune_mask = prune_mask.bool_or(harmful);
++        }
+ 
+         let (mut splats, refiner, pruned_count) =
+             prune_points(splats, &mut optim, refiner, prune_mask).await;
+@@ -678,6 +736,7 @@ impl SplatTrainer {
+                 num_split_high_grad,
+                 num_pruned: pruned_count,
+                 num_pruned_non_finite,
++                num_pruned_harmful,
+                 total_splats: splat_count,
+             },
+         )

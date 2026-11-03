@@ -1,0 +1,42 @@
+[project]
+name = "gausify-comfyui"
+version = "0.1.0"
+description = "Orbit video to Gaussian splat in ComfyUI: frame selection, camera poses (AKAZE or COLMAP) and Brush training, reproducing gausify-orbit. NVIDIA/CUDA only."
+authors = [{ name = "nix", email = "mail.dba@tutanota.de" }]
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+classifiers = ["Operating System :: POSIX :: Linux", "Operating System :: Microsoft :: Windows"]
+dependencies = [
+    "numpy",
+    "scipy",
+    "opencv-python-headless==4.12.*",
+    "pillow",
+    "pycolmap-cuda12==4.2.1; sys_platform == 'linux'",
+    "nvidia-cuda-runtime-cu12; sys_platform == 'linux'",
+    "nvidia-curand-cu12; sys_platform == 'linux'",
+    "pycolmap==4.2.1; sys_platform == 'win32'",
+]
+
+[project.urls]
+Repository = "https://github.com/michael-mueller-git/gausify-comfyui"
+
+[tool.comfy]
+PublisherId = "michael-mueller-git"
+DisplayName = "Gausify Orbit"
+Icon = ""
+includes = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = ["slow: long end-to-end tests (deselect with -m 'not slow')"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = [".dev", ".venv", "brush"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501", "E741"]
