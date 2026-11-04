@@ -174,3 +174,81 @@ def test_manifest_shape():
             assert p["url"].startswith("https://") and p["exe"]
             assert p["sha256"] is None or len(p["sha256"]) == 64
     json.dumps(m)
+
+
+# ------------------------------------------------------------------ ensure_model
+
+
+def _model_manifest(data: bytes, **over):
+    return {"tiny-model": {"label": "Tiny", "file": "tiny.onnx", "url": "http://x/tiny.onnx",
+                           "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data), **over}}
+
+
+@pytest.fixture
+def model_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("GAUSIFY_MODEL_DIR", str(tmp_path / "models"))
+    monkeypatch.delenv("GAUSIFY_MODEL_TINY_MODEL", raising=False)
+    calls = []
+
+    def fake_download(url, dest, progress):
+        calls.append(url)
+        dest.write_bytes(fake_download.data)
+        if progress:
+            progress(1.0, "downloading")
+        return hashlib.sha256(fake_download.data).hexdigest()
+
+    fake_download.data = b"onnx-bytes" * 10
+    monkeypatch.setattr(downloader, "_download", fake_download)
+    return fake_download, calls, tmp_path / "models"
+
+
+def test_ensure_model_downloads_once(model_env):
+    fd, calls, root = model_env
+    man = _model_manifest(fd.data)
+    seen = []
+    p = downloader.ensure_model("tiny-model", lambda f, m: seen.append(f), man)
+    assert p == root / "tiny.onnx" and p.read_bytes() == fd.data and seen == [1.0]
+    assert downloader.ensure_model("tiny-model", None, man) == p
+    assert len(calls) == 1  # cache hit
+    assert [f.name for f in root.iterdir() if f.is_file() and not f.name.startswith(".")] == ["tiny.onnx"]
+    assert downloader.model_cached("tiny-model", man)
+
+
+def test_ensure_model_mismatch(model_env):
+    fd, calls, root = model_env
+    with pytest.raises(ValueError, match="sha256 mismatch"):
+        downloader.ensure_model("tiny-model", None, _model_manifest(fd.data, sha256="0" * 64))
+    with pytest.raises(ValueError, match="size mismatch"):
+        downloader.ensure_model("tiny-model", None, _model_manifest(fd.data, bytes=5))
+    assert not (root / "tiny.onnx").exists()
+    assert not [p for p in root.iterdir() if p.name.startswith(".tiny.onnx-")]  # temp dirs removed
+
+
+def test_ensure_model_env_override_and_unknown(model_env, tmp_path, monkeypatch):
+    fd, calls, _ = model_env
+    local = tmp_path / "mine.onnx"
+    local.write_bytes(b"x")
+    monkeypatch.setenv("GAUSIFY_MODEL_TINY_MODEL", str(local))
+    assert downloader.ensure_model("tiny-model", None, _model_manifest(fd.data)) == local
+    assert not calls
+    monkeypatch.setenv("GAUSIFY_MODEL_TINY_MODEL", str(tmp_path / "missing"))
+    with pytest.raises(FileNotFoundError):
+        downloader.ensure_model("tiny-model", None, _model_manifest(fd.data))
+    monkeypatch.delenv("GAUSIFY_MODEL_TINY_MODEL")
+    with pytest.raises(KeyError):
+        downloader.ensure_model("nope", None, _model_manifest(fd.data))
+
+
+def test_models_json():
+    man = downloader.load_manifest(downloader.MODELS_MANIFEST)
+    assert "rmbg" in man and len([k for k in man if k.startswith("sam2-fp32-")]) == 4
+    assert len([k for k in man if k.startswith("sam2-fp16-")]) == 4
+    for k, e in man.items():
+        assert len(e["sha256"]) == 64 and e["bytes"] > 0 and e["url"].startswith("https://huggingface.co/"), k
+
+
+def test_model_dir_default(monkeypatch, tmp_path):
+    monkeypatch.delenv("GAUSIFY_MODEL_DIR", raising=False)
+    monkeypatch.setattr(downloader.Path, "home", classmethod(lambda cls: tmp_path))
+    d = downloader.model_dir()
+    assert d.name == "models" and d.parent.name == "gausify"

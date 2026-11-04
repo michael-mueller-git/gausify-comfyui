@@ -23,8 +23,11 @@ ROOT = Path(__file__).resolve().parents[1]
 import nodes  # noqa: E402
 from nodes import common  # noqa: E402
 from nodes.frame_select import GausifyFrameSelect  # noqa: E402
+from nodes.masks import GausifyMaskChroma, GausifyMaskRMBG, GausifyMaskSAM2  # noqa: E402
 from nodes.poses import GausifyPoses  # noqa: E402
 from nodes.train import GausifyTrainSplat, train_options  # noqa: E402
+
+MASK_NODES = (GausifyMaskChroma, GausifyMaskRMBG, GausifyMaskSAM2)
 
 
 @pytest.fixture
@@ -55,8 +58,19 @@ def test_mappings():
         assert callable(getattr(cls, cls.FUNCTION))
         assert len(cls.RETURN_TYPES) == len(cls.RETURN_NAMES)
         it = cls.INPUT_TYPES()
+        if cls in MASK_NODES:  # no quality preset
+            assert "preset" not in it["required"] and "preset" not in it.get("optional", {})
+            assert cls.RETURN_TYPES == ("MASK", "STRING") and cls.RETURN_NAMES == ("masks", "stats")
+            assert it["required"]["images"] == ("IMAGE",)
+            continue
         assert it["required"]["preset"][0] == PRESET_NAMES
         assert it["required"]["preset"][1]["default"] == DEFAULT_PRESET
+    assert len(MASK_NODES) == 3 and all(c in nodes.NODE_CLASS_MAPPINGS.values() for c in MASK_NODES)
+    assert {c for c in nodes.NODE_CLASS_MAPPINGS.values() if c not in MASK_NODES} == {
+        GausifyFrameSelect, GausifyPoses, GausifyTrainSplat}
+    assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskChroma"] == "Gausify Orbit Mask (Solid Colour)"
+    assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskRMBG"] == "Gausify Orbit Mask (RMBG-1.4)"
+    assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskSAM2"] == "Gausify Orbit Mask (SAM 2.1)"
 
 
 def test_root_package_loads():
@@ -327,7 +341,11 @@ def test_example_workflow_matches_nodes():
     wf = json.loads((ROOT / "workflows" / "gausify_orbit.json").read_text())
     by_type = {n["type"]: n for n in wf["nodes"]}
     links = {link[0]: link for link in wf["links"]}
+    assert {"GausifyOrbitFrameSelect", "GausifyOrbitPoses", "GausifyOrbitTrainSplat", "GausifyOrbitMaskChroma"} <= set(by_type)
     for name, cls in nodes.NODE_CLASS_MAPPINGS.items():
+        if name not in by_type:  # the RMBG and SAM 2.1 mask nodes are alternatives to the Solid Colour one
+            assert cls in MASK_NODES, name
+            continue
         n = by_type[name]
         it = cls.INPUT_TYPES()
         widgets = [k for sect in ("required", "optional") for k, v in it.get(sect, {}).items()
@@ -339,3 +357,108 @@ def test_example_workflow_matches_nodes():
             if inp["link"] is not None:
                 assert links[inp["link"]][5] == inp["type"]
     assert by_type["Preview3D"]["inputs"][0]["link"] in links
+
+
+# ---------------------------------------------------------------- mask nodes
+
+
+def test_mask_node_inputs():
+    c = GausifyMaskChroma.INPUT_TYPES()["required"]
+    assert c["auto_color"][1]["default"] is True and c["color"][1]["default"] == "#00ff00"
+    assert (c["tolerance"][1]["default"], c["tolerance"][1]["min"], c["tolerance"][1]["max"]) == (12, 0, 100)
+    assert (c["softness"][1]["default"], c["softness"][1]["max"]) == (6, 100)
+    assert c["contiguous"][1]["default"] is True
+    r = GausifyMaskRMBG.INPUT_TYPES()["required"]
+    assert r["accept_noncommercial_license"][1]["default"] is False
+    assert r["device"][0] == ["auto", "cuda", "cpu"]
+    s = GausifyMaskSAM2.INPUT_TYPES()["required"]
+    assert s["prompt_frame"][1]["min"] == 0 and s["box"][1]["default"] == "" and s["points"][1]["default"] == ""
+    assert s["variant"][0] == ["fp32", "fp16"] and s["variant"][1]["default"] == "fp32"
+
+
+def test_train_despill_tooltip_mentions_solid_colour():
+    tip = GausifyTrainSplat.INPUT_TYPES()["required"]["despill"][1]["tooltip"]
+    assert "Solid Colour" in tip
+
+
+def test_rmbg_license_guard():
+    with pytest.raises(ValueError, match="non-commercial"):
+        GausifyMaskRMBG().mask(torch.zeros(1, 8, 8, 3), False, "cpu")
+
+
+def test_prompt_parsing():
+    from nodes import masks as nm
+
+    assert nm.parse_color("#00ff00") == (0, 255, 0) and nm.parse_color("F00") == (255, 0, 0)
+    assert nm.parse_color("10, 20,30") == (10, 20, 30)
+    for bad in ("", "#12", "1,2", "300,0,0", "red"):
+        with pytest.raises(ValueError, match="color"):
+            nm.parse_color(bad)
+    assert nm.parse_box("") is None and nm.parse_box(" 0.1, 0.2,0.8,0.9 ") == [0.1, 0.2, 0.8, 0.9]
+    for bad in ("0.1,0.2,0.3", "a,b,c,d", "0.8,0.2,0.1,0.9", "0,0,2,1"):
+        with pytest.raises(ValueError, match="box"):
+            nm.parse_box(bad)
+    assert nm.parse_points("") == []
+    assert nm.parse_points("0.5,0.5,1; 0.1,0.2,0;") == [
+        {"x": 0.5, "y": 0.5, "label": 1}, {"x": 0.1, "y": 0.2, "label": 0}]
+    for bad in ("0.5,0.5", "0.5,0.5,2", "1.5,0.5,1", "x,y,1"):
+        with pytest.raises(ValueError, match="point"):
+            nm.parse_points(bad)
+    assert nm.sam2_prompt("", "") is None
+    assert nm.sam2_prompt("0,0,1,1", "") == {"box": [0, 0, 1, 1], "points": []}
+
+
+def test_sam2_node_wiring(monkeypatch):
+    import gausify.masking.sam2 as sam2
+
+    seen = {}
+
+    def fake(frames, prompt, start, variant, progress, cancel, device):
+        seen.update(prompt=prompt, start=start, variant=variant, device=device, shape=frames.shape)
+        m = np.zeros(frames.shape[:3], np.uint8)
+        m[:, :, 4:] = 255
+        return m, {"count": len(frames), "meanCoverage": 0.5, "noSubject": 0, "backend": "fake", "keyColor": None}
+
+    monkeypatch.setattr(sam2, "sam2_masks", fake)
+    node = GausifyMaskSAM2()
+    masks, stats = node.mask(torch.zeros(3, 8, 8, 3), 2, "0.1,0.1,0.9,0.9", "0.5,0.5,1", "fp16", "cpu")
+    assert seen["start"] == 2 and seen["variant"] == "fp16" and seen["device"] == "cpu"
+    assert seen["prompt"]["box"] == [0.1, 0.1, 0.9, 0.9] and seen["prompt"]["points"][0]["label"] == 1
+    assert masks.shape == (3, 8, 8) and masks.dtype == torch.float32 and float(masks.max()) == 1.0
+    assert json.loads(stats)["backend"] == "fake"
+    node.mask(torch.zeros(3, 8, 8, 3), 0, "", "", "fp32", "auto")
+    assert seen["prompt"] is None
+    with pytest.raises(ValueError, match="prompt_frame"):
+        node.mask(torch.zeros(3, 8, 8, 3), 3, "", "", "fp32", "auto")
+    with pytest.raises(ValueError, match="box"):
+        node.mask(torch.zeros(3, 8, 8, 3), 0, "1,2", "", "fp32", "auto")
+
+
+def test_rmbg_node_wiring(monkeypatch):
+    import gausify.masking.rmbg as rmbg
+
+    def fake(frames, progress, cancel, device):
+        return np.full(frames.shape[:3], 255, np.uint8), {"count": len(frames), "meanCoverage": 1.0, "noSubject": 0,
+                                                          "backend": f"RMBG-1.4 · {device}", "keyColor": None}
+
+    monkeypatch.setattr(rmbg, "rmbg_masks", fake)
+    masks, stats = GausifyMaskRMBG().mask(torch.zeros(2, 8, 8, 3), True, "cpu")
+    assert masks.shape == (2, 8, 8) and float(masks.min()) == 1.0
+    assert json.loads(stats)["backend"] == "RMBG-1.4 · cpu"
+
+
+def test_chroma_node_green_screen():
+    n, h, w = 3, 40, 48
+    img = np.zeros((n, h, w, 3), np.float32)
+    img[:] = np.array([20, 200, 30]) / 255
+    img[:, 10:30, 12:36] = np.array([200, 40, 40]) / 255
+    masks, stats = GausifyMaskChroma().mask(torch.from_numpy(img), True, "#00ff00", 12, 6, True)
+    assert masks.shape == (n, h, w) and masks.dtype == torch.float32
+    assert float(masks[0, 0, 0]) == 0.0 and float(masks[1, 20, 20]) == 1.0
+    st = json.loads(stats)
+    assert set(st) == {"count", "meanCoverage", "noSubject", "backend", "keyColor"}
+    assert st["count"] == n and st["noSubject"] == 0 and st["keyColor"] == [20, 200, 30]
+    assert abs(st["meanCoverage"] - (20 * 24) / (h * w)) < 1e-6
+    # Manual key colour: the median of the frames' keys is the colour given.
+    _, stats = GausifyMaskChroma().mask(torch.from_numpy(img), False, "#14c81e", 12, 6, True)
+    assert json.loads(stats)["keyColor"] == [20, 200, 30]

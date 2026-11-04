@@ -14,6 +14,9 @@ sharp-frame selection, camera poses (AKAZE + incremental SfM, or COLMAP's SIFT
 | Node | Inputs | Outputs |
 |---|---|---|
 | **Gausify Orbit Frame Select** | `video` (core VIDEO) or `images` + `fps` (0 = image sequence); preset, frames, max_side, candidates, trim_start, trim_end (-1 = end) | IMAGE, ORBIT_TIMES |
+| **Gausify Orbit Mask (Solid Colour)** | images; auto_color, color, tolerance, softness, contiguous | MASK, stats (JSON) |
+| **Gausify Orbit Mask (RMBG-1.4)** | images; accept_noncommercial_license, device | MASK, stats (JSON) |
+| **Gausify Orbit Mask (SAM 2.1)** | images; prompt_frame, box, points, variant (`fp32`/`fp16`), device | MASK, stats (JSON) |
 | **Gausify Orbit Poses** | images, frame_times, masks (optional); preset, estimator (`akaze`/`colmap`), match_window, closed_loop, flat_orbit, fill_missing, use_mask_for_poses, pose_check (`off`/`auto`/`always`, needs masks) | GAUSIFY_CAMERAS, colmap_path, stats (JSON) |
 | **Gausify Orbit Train Splat** | cameras; preset, steps, sh_degree, max_splats (millions), max_resolution, ssim, reduce_haze (masked only), psnr, despill + strength (masked only), seed, filename_prefix | ply_path (relative to the output folder), num_splats, psnr |
 
@@ -29,6 +32,32 @@ Masks: plug any node that produces one MASK per selected frame (white =
 subject) into the Poses node. With masks, training is done on RGBA cut-outs
 and the pose check becomes available.
 
+## Masks
+
+Three nodes cut the subject out of the Frame Select images (ports of the
+masking methods of gausify-orbit); connect their `masks` to the Poses node.
+`stats` is JSON: `count`, `meanCoverage`, `noSubject`, `backend`, `keyColor`.
+
+| Method | How | License | Download |
+|---|---|---|---|
+| Solid Colour | Chroma key: distance to the background colour (median of the frame borders, or `color`), tolerance, softness, flood fill from the borders (`contiguous` keeps holes in the subject) | none (no model) | none |
+| RMBG-1.4 | BRIA AI background removal, one frame at a time | **non-commercial** (BRIA RMBG-1.4); set `accept_noncommercial_license` | 176 MB |
+| SAM 2.1 | Meta's SAM 2.1 tiny video tracking: mark the subject on `prompt_frame` with `box` (`x0,y0,x1,y1`) and/or `points` (`x,y,label;...`, label 1 = subject, 0 = background), all normalized 0-1; with neither, the object at the centre is tracked. Propagated forward, then backward; consistent across frames | Apache-2.0 | fp32 165 MB, fp16 84 MB |
+
+Models are downloaded on first use (sha256-checked) into `$GAUSIFY_MODEL_DIR`,
+else `ComfyUI/models/gausify/models` (else `~/.cache/gausify/models`). Use a local
+file with `GAUSIFY_MODEL_RMBG=/path/model.onnx` (SAM 2.1:
+`GAUSIFY_MODEL_SAM2_FP32_VISION_ENCODER`, ...; names in `gausify/models.json`).
+`device` is `auto` (CUDA, else CPU), `cuda` or `cpu`.
+
+Despill: with a green or blue screen, enable `despill` on the Train node. It
+is meant for Solid Colour masks (as in the app, where only chroma-key masks
+are despilled): it needs a saturated green or blue background in the masked-out area.
+
+ONNX Runtime: the nodes need `onnxruntime-gpu`. The plain `onnxruntime` package
+conflicts with it (both provide the same module); if another node pack
+installed it, `pip uninstall onnxruntime` first, then reinstall `onnxruntime-gpu`.
+
 ## Install
 
 Manual install:
@@ -40,7 +69,7 @@ pip install -r gausify-comfyui/requirements.txt
 ```
 
 Keep a folder name other than `gausify` (that name is the library package
-inside). Dependencies: numpy, scipy, opencv-python-headless 4.12, pillow and
+inside). Dependencies: numpy, scipy, opencv-python-headless 4.12, pillow, onnxruntime-gpu and
 COLMAP 4.2.1 (`pycolmap-cuda12` + CUDA runtime wheels). `brush-cli` is downloaded on first use into
 `ComfyUI/models/gausify/bin` (override with `GAUSIFY_BIN_DIR`).
 

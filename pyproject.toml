@@ -9,6 +9,7 @@ requires-python = ">=3.10"
 classifiers = ["Operating System :: POSIX :: Linux"]
 dependencies = [
     "numpy",
+    "onnxruntime-gpu>=1.20",
     "scipy",
     "opencv-python-headless==4.12.*",
     "pillow",

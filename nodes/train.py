@@ -73,7 +73,7 @@ class GausifyTrainSplat:
                                             "tooltip": "Depth distortion: less haze around the subject (masked only)."}),
                 "psnr": ("BOOLEAN", {"default": _T["eval_split_every"] > 0,
                                      "tooltip": "Hold out every 16th frame and report its PSNR."}),
-                "despill": ("BOOLEAN", {"default": False, "tooltip": "Remove green/blue screen spill (masked only; the app applies it only to chroma-key masks)."}),
+                "despill": ("BOOLEAN", {"default": False, "tooltip": "Remove green/blue screen spill from the subject (masked only). Meant for masks from the Gausify Orbit Mask (Solid Colour) node: the app applies it only to chroma-key masks, and it does nothing unless the masked-out background is a saturated green or blue."}),
                 "despill_strength": ("INT", {"default": 100, "min": 0, "max": 100}),
                 "seed": ("INT", {"default": 42, "min": 0, "max": 2**63 - 1}),
                 "filename_prefix": ("STRING", {"default": "gausify/orbit"}),

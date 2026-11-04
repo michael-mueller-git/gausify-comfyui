@@ -9,6 +9,11 @@
    `~/.cache/gausify/bin`), sha256-verified, extracted next to it and renamed
    into place atomically. A lock file serialises concurrent first uses.
 
+`ensure_model(name)` does the same for the ONNX models of `gausify/models.json`
+(`$GAUSIFY_MODEL_<NAME>` overrides with a local file; cache in
+`$GAUSIFY_MODEL_DIR`, else ComfyUI's `models/gausify/models`, else
+`~/.cache/gausify/models`; size and sha256 are checked).
+
 No ComfyUI dependency: `folder_paths` is only used when it can be imported.
 """
 
@@ -200,3 +205,81 @@ def ensure_binary(
             shutil.rmtree(work, ignore_errors=True)
     log.info("%s ready at %s", name, exe)
     return exe
+
+
+# ------------------------------------------------------------------ models
+
+MODELS_MANIFEST = Path(__file__).with_name("models.json")
+
+
+def model_env_var(name: str) -> str:
+    return "GAUSIFY_MODEL_" + name.upper().replace("-", "_")
+
+
+def model_dir() -> Path:
+    env = os.environ.get("GAUSIFY_MODEL_DIR")
+    if env:
+        return Path(env).expanduser()
+    try:  # Inside ComfyUI.
+        import folder_paths  # type: ignore[import-not-found]
+
+        return Path(folder_paths.models_dir) / "gausify" / "models"
+    except Exception:  # noqa: BLE001
+        pass
+    return Path.home() / ".cache" / "gausify" / "models"
+
+
+def model_spec(name: str, manifest: dict | None = None) -> dict:
+    """Entry `name` of models.json: label, file, url, sha256, bytes."""
+    manifest = manifest if manifest is not None else load_manifest(MODELS_MANIFEST)
+    if name not in manifest:
+        raise KeyError(f"unknown model {name!r} (models.json has {sorted(manifest)})")
+    return manifest[name]
+
+
+def model_cached(name: str, manifest: dict | None = None) -> bool:
+    """Is the model file already in place (right size)? Env overrides count."""
+    if os.environ.get(model_env_var(name)):
+        return True
+    spec = model_spec(name, manifest)
+    f = model_dir() / spec["file"]
+    return f.is_file() and f.stat().st_size == spec["bytes"]
+
+
+def ensure_model(
+    name: str,
+    progress: Callable[[float, str], None] | None = None,
+    manifest: dict | None = None,
+) -> Path:
+    """Path of the model file `name` from models.json, downloading it on first use
+    (size and sha256 checked, atomic rename, lock file)."""
+    override = os.environ.get(model_env_var(name))
+    if override:
+        p = Path(override).expanduser()
+        if not p.is_file():
+            raise FileNotFoundError(f"{model_env_var(name)}={override} does not exist")
+        return p
+    spec = model_spec(name, manifest)
+    root = model_dir()
+    final = root / spec["file"]
+    if final.is_file() and final.stat().st_size == spec["bytes"]:
+        return final
+    root.mkdir(parents=True, exist_ok=True)
+    with file_lock(root / f".{spec['file']}.lock"):
+        if final.is_file() and final.stat().st_size == spec["bytes"]:
+            return final
+        tmp = Path(tempfile.mkdtemp(prefix=f".{spec['file']}-", dir=root))
+        try:
+            part = tmp / spec["file"]
+            log.info("downloading %s from %s", spec.get("label", name), spec["url"])
+            digest = _download(spec["url"], part, progress)
+            size = part.stat().st_size
+            if size != spec["bytes"]:
+                raise ValueError(f"size mismatch for {spec['url']}: got {size} bytes, expected {spec['bytes']}")
+            if digest.lower() != spec["sha256"].lower():
+                raise ValueError(f"sha256 mismatch for {spec['url']}: got {digest}, expected {spec['sha256']}")
+            os.replace(part, final)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    log.info("%s ready at %s", name, final)
+    return final

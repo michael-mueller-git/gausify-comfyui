@@ -1,5 +1,6 @@
 # torch is provided by ComfyUI.
 numpy
+onnxruntime-gpu>=1.20
 scipy
 opencv-python-headless==4.12.*
 pillow

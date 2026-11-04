@@ -1,0 +1,65 @@
+{
+  "rmbg": {
+    "label": "RMBG-1.4",
+    "file": "rmbg14.onnx",
+    "url": "https://huggingface.co/briaai/RMBG-1.4/resolve/2ceba5a5efaec153162aedea169f76caf9b46cf8/onnx/model.onnx",
+    "sha256": "8cafcf770b06757c4eaced21b1a88e57fd2b66de01b8045f35f01535ba742e0f",
+    "bytes": 176153355
+  },
+  "sam2-fp32-vision_encoder": {
+    "label": "SAM 2.1 (vision_encoder)",
+    "file": "sam21-tiny-vision_encoder.onnx",
+    "url": "https://huggingface.co/jax-image-tools/sam21-tiny-video-onnx/resolve/3cb090d9d0b4c897281fdcac7765c0f3a888c49f/vision_encoder.onnx",
+    "sha256": "98311f41182f40c57cac2522180fff34b53931ce981412ddd8643ec27fb830e3",
+    "bytes": 109497134
+  },
+  "sam2-fp32-mask_decoder": {
+    "label": "SAM 2.1 (mask_decoder)",
+    "file": "sam21-tiny-mask_decoder.onnx",
+    "url": "https://huggingface.co/jax-image-tools/sam21-tiny-video-onnx/resolve/3cb090d9d0b4c897281fdcac7765c0f3a888c49f/mask_decoder.onnx",
+    "sha256": "6e75023b52586314ab1dcf5a49fb9731a983ffe2b7b2a419bd42cd2b2e77effa",
+    "bytes": 17800545
+  },
+  "sam2-fp32-memory_attention": {
+    "label": "SAM 2.1 (memory_attention)",
+    "file": "sam21-tiny-memory_attention.onnx",
+    "url": "https://huggingface.co/jax-image-tools/sam21-tiny-video-onnx/resolve/3cb090d9d0b4c897281fdcac7765c0f3a888c49f/memory_attention.onnx",
+    "sha256": "afd5045a8fe48628d4da49a82b77351a43f7554f1f101a5052ab74aae69e3737",
+    "bytes": 32364264
+  },
+  "sam2-fp32-memory_encoder": {
+    "label": "SAM 2.1 (memory_encoder)",
+    "file": "sam21-tiny-memory_encoder.onnx",
+    "url": "https://huggingface.co/jax-image-tools/sam21-tiny-video-onnx/resolve/3cb090d9d0b4c897281fdcac7765c0f3a888c49f/memory_encoder.onnx",
+    "sha256": "3a97e8ba25180b39e938ab52a0c4d085007b25f3e919f5672d4ecbcdd2ab9ee3",
+    "bytes": 5586836
+  },
+  "sam2-fp16-vision_encoder": {
+    "label": "SAM 2.1 (vision_encoder)",
+    "file": "sam21-tiny-fp16-vision_encoder.onnx",
+    "url": "https://huggingface.co/obraia/sam2.1-tiny-video-onnx-fp16/resolve/c6f0b87d6562f8926ff6619bbd70e1e7400e1569/vision_encoder.onnx",
+    "sha256": "3d900ac4aa30cba77383e4ec0e61e9dfb3e3bf0598cdb838ffa15d5dd237e82d",
+    "bytes": 55234395
+  },
+  "sam2-fp16-mask_decoder": {
+    "label": "SAM 2.1 (mask_decoder)",
+    "file": "sam21-tiny-fp16-mask_decoder.onnx",
+    "url": "https://huggingface.co/obraia/sam2.1-tiny-video-onnx-fp16/resolve/c6f0b87d6562f8926ff6619bbd70e1e7400e1569/mask_decoder.onnx",
+    "sha256": "1c443d3ab5ff98dda8d453d830baa7773f209bf563f544c7c3b7a0b7b982c839",
+    "bytes": 9091532
+  },
+  "sam2-fp16-memory_attention": {
+    "label": "SAM 2.1 (memory_attention)",
+    "file": "sam21-tiny-fp16-memory_attention.onnx",
+    "url": "https://huggingface.co/obraia/sam2.1-tiny-video-onnx-fp16/resolve/c6f0b87d6562f8926ff6619bbd70e1e7400e1569/memory_attention.onnx",
+    "sha256": "38bbdd70bda2bffe4666e60ee0c7ed7ce9b63fdc2da0f14d996e4255bf09b995",
+    "bytes": 16440396
+  },
+  "sam2-fp16-memory_encoder": {
+    "label": "SAM 2.1 (memory_encoder)",
+    "file": "sam21-tiny-fp16-memory_encoder.onnx",
+    "url": "https://huggingface.co/obraia/sam2.1-tiny-video-onnx-fp16/resolve/c6f0b87d6562f8926ff6619bbd70e1e7400e1569/memory_encoder.onnx",
+    "sha256": "d5c21573d2de61d2c35702c4e50f18215314b0de82bb3f9145e1a075a169345c",
+    "bytes": 2837008
+  }
+}

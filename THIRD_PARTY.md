@@ -31,3 +31,27 @@ Chapel Hill. Used through `pycolmap-cuda12` 4.2.1 (pip). COLMAP bundles further 
 
 `nvidia-cuda-runtime-cu12` and `nvidia-curand-cu12` (pip) are distributed
 under the NVIDIA CUDA Toolkit EULA.
+
+## RMBG-1.4 — BRIA AI, non-commercial
+
+<https://huggingface.co/briaai/RMBG-1.4> (revision `2ceba5a5efaec153162aedea169f76caf9b46cf8`).
+Released by BRIA AI under the RMBG-1.4 license: **free for non-commercial use
+only**; commercial use needs a license from BRIA. The model is downloaded on
+first use and never redistributed here; the RMBG node asks you to accept the
+license (`accept_noncommercial_license`).
+
+## SAM 2.1 — Meta, Apache License 2.0
+
+<https://github.com/facebookresearch/sam2> (Segment Anything Model 2.1, tiny).
+Run from ONNX exports downloaded on first use:
+[jax-image-tools/sam21-tiny-video-onnx](https://huggingface.co/jax-image-tools/sam21-tiny-video-onnx)
+(fp32) and [obraia/sam2.1-tiny-video-onnx-fp16](https://huggingface.co/obraia/sam2.1-tiny-video-onnx-fp16)
+(fp16). `gausify/masking/assets/sam2-params.bin` holds three small parameter
+tensors (no_memory_embedding, memory temporal positional encoding, object
+pointer temporal projection) extracted from `facebook/sam2.1-hiera-tiny`, as in
+gausify-orbit; Apache-2.0.
+
+## ONNX Runtime — MIT License
+
+<https://github.com/microsoft/onnxruntime>, Copyright (c) Microsoft Corporation
+(`onnxruntime-gpu`, pip).
