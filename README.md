@@ -60,14 +60,28 @@ installed it, `pip uninstall onnxruntime` first, then reinstall `onnxruntime-gpu
 
 ## Install
 
-Manual install:
-
 ```bash
 source /path/to/ComfyUI/venv/bin/activate  # ComfyUI's Python env, e.g. /comfy/mnt/venv
 cd ComfyUI/custom_nodes
 git clone https://github.com/michael-mueller-git/gausify-comfyui
-pip install -r gausify-comfyui/requirements.txt
+gausify-comfyui/scripts/install.sh            # add --models and/or --colmap, see below
 ```
+
+`scripts/install.sh` installs `requirements.txt` and repairs the two setups
+that break the nodes: it keeps exactly one OpenCV build, between 4.12 and 5
+(an installed contrib build stays contrib), and replaces plain `onnxruntime`
+with `onnxruntime-gpu`. It then downloads `brush-cli` into
+`models/gausify/bin`, and checks that OpenCV has AKAZE and that ONNX Runtime
+can use CUDA. Options:
+
+- `--models`: also downloads the mask models (SAM 2.1 fp32 and RMBG-1.4, about 350 MB). With them in
+  place, the check also tests that CUDA actually initialises.
+- `--colmap`: also builds the COLMAP venv (see below).
+
+`PYTHON=/path/to/python` uses that interpreter instead of the active venv.
+Running the script again is safe. Restart ComfyUI afterwards.
+
+Manual install instead: `pip install -r gausify-comfyui/requirements.txt`.
 
 If ComfyUI runs with `--base-directory` (e.g. Docker images using `/basedir`),
 it loads custom nodes from `<base-directory>/custom_nodes`, not
