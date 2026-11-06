@@ -90,9 +90,14 @@ def is_ready(venv: Path, packages=PACKAGES) -> bool:
 
 
 def manual_command(venv: Path, packages=PACKAGES) -> str:
+    """Shell command that builds the venv outside ComfyUI, the same way (stamp
+    included; a plain `python -m venv` + `pip install` would be rebuilt).
+    `packages` is accepted for symmetry; the command always builds PACKAGES."""
+    root = Path(__file__).resolve().parent.parent
+    code = "from gausify.colmap_env import ensure_colmap_env; print(ensure_colmap_env())"
     return (
-        f"{shlex.quote(sys.executable)} -m venv {shlex.quote(str(venv))} && "
-        f"{shlex.quote(str(venv_python(venv)))} -m pip install {' '.join(shlex.quote(p) for p in packages)}"
+        f"cd {shlex.quote(str(root))} && {ENV_VENV}={shlex.quote(str(venv))} "
+        f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
     )
 
 
@@ -167,7 +172,7 @@ def ensure_colmap_env(
             rc = _run_logged(cmd, tail, on_line)
             if rc != 0:
                 raise ColmapEnvError(
-                    f"installing the COLMAP packages failed (pip exit code {rc}):\n"
+                    f"installing the COLMAP packages ({' '.join(packages)}) failed (pip exit code {rc}):\n"
                     + "\n".join(tail)
                     + f"\nTo set it up manually: {manual_command(venv, packages)}"
                 )

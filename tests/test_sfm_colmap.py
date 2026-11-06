@@ -428,5 +428,6 @@ def test_env_failure_message(env, monkeypatch):
     with pytest.raises(colmap_env.ColmapEnvError) as e:
         colmap_env.ensure_colmap_env()
     msg = str(e.value)
-    assert "no matching distribution" in msg and "-m pip install" in msg and "pycolmap-cuda12==4.2.1" in msg
+    assert "no matching distribution" in msg and "pycolmap-cuda12==4.2.1" in msg
+    assert "ensure_colmap_env" in msg and f"GAUSIFY_COLMAP_VENV={venv}" in msg
     assert not venv.exists()

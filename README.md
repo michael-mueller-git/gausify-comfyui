@@ -87,6 +87,56 @@ in a subprocess from that venv; ComfyUI never imports it. The venv is at
 packages change. `GAUSIFY_COLMAP_PIP_ARGS` adds arguments to its `pip install`
 (e.g. `--index-url https://...`). The AKAZE estimator needs none of this.
 
+### COLMAP environment: set up ahead of time
+
+To build the COLMAP venv before the first run (e.g. to see pip's output, or on
+a machine where ComfyUI has no network), run the node's own setup with
+ComfyUI's Python. It creates the venv exactly as the node expects:
+
+```bash
+source /path/to/ComfyUI/venv/bin/activate
+cd ComfyUI/custom_nodes/gausify-comfyui
+GAUSIFY_COLMAP_VENV=/path/to/ComfyUI/models/gausify/colmap-venv \
+python -c "
+import logging; logging.basicConfig(level=logging.INFO)
+from gausify.colmap_env import ensure_colmap_env
+print('ready:', ensure_colmap_env())
+"
+```
+
+Set `GAUSIFY_COLMAP_VENV` explicitly here: outside ComfyUI the default falls
+back to `~/.cache`. If you choose a path other than `ComfyUI/models/gausify/colmap-venv`,
+export the same variable for ComfyUI too. Use ComfyUI's Python: the venv is
+stamped with its version and rebuilt if it differs. Don't create it with a plain
+`python -m venv` + `pip install`; without the stamp the node replaces it.
+
+Check that COLMAP sees the GPU:
+
+```bash
+/path/to/ComfyUI/models/gausify/colmap-venv/bin/python -c "
+import sys; sys.path.insert(0, '.')
+from gausify.cuda_libs import import_pycolmap
+p = import_pycolmap(); print('cuda build:', p.has_cuda, 'devices:', p.get_num_cuda_devices())"
+```
+
+Expect `cuda build: True devices: 1` (or more).
+
+### Upgrading from a version that installed pycolmap into ComfyUI's venv
+
+Older versions put `pycolmap-cuda12` in ComfyUI's venv, which downgraded
+torch's `cuda-toolkit` metapackage (and pinned opencv 4.12 / numpy < 2.3).
+Restore torch's `cuda-toolkit` version (see `pip check`; torch 2.15 wants 13.2.2),
+remove pycolmap, and reinstall:
+
+```bash
+pip install cuda-toolkit==13.2.2          # the version torch requires
+pip uninstall -y pycolmap-cuda12
+pip install -r requirements.txt
+pip check
+```
+
+If other nodes needed newer opencv/numpy than 4.12/2.2, reinstall the versions you had.
+
 Working files (frames, masks, COLMAP models) go to ComfyUI's temp folder,
 keyed by content, so re-running with the same inputs reuses the poses.
 
