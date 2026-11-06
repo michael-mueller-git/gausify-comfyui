@@ -32,6 +32,10 @@ def session(path, device: str = "auto", label: str = ""):
             "device=cuda but ONNX Runtime has no CUDAExecutionProvider "
             "(install onnxruntime-gpu and uninstall plain onnxruntime)"
         )
+    if device == "auto" and not has_cuda:
+        log.warning("%s runs on CPU: ONNX Runtime %s has no CUDAExecutionProvider (providers: %s); "
+                    "install onnxruntime-gpu and uninstall plain onnxruntime",
+                    label or "ONNX model", ort.__version__, ", ".join(ort.get_available_providers()))
     if device != "cpu" and has_cuda:
         preload = getattr(ort, "preload_dlls", None)
         if preload is not None:
@@ -45,6 +49,9 @@ def session(path, device: str = "auto", label: str = ""):
                 return s, _label(label, "CUDA")
             if device == "cuda":
                 raise RuntimeError("CUDAExecutionProvider could not be initialised")
+            log.warning("%s runs on CPU: the CUDAExecutionProvider of ONNX Runtime %s could not be initialised "
+                        "(usually missing CUDA/cuDNN libraries of the CUDA version this onnxruntime-gpu was built for)",
+                        label or "ONNX model", ort.__version__)
         except Exception as e:  # noqa: BLE001
             if device == "cuda":
                 raise
