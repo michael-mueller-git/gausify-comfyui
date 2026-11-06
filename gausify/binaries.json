@@ -5,7 +5,7 @@
     "platforms": {
       "linux-x64": {
         "url": "https://github.com/michael-mueller-git/gausify-comfyui/releases/download/brush-v{version}/brush-cli-{version}-linux-x64.tar.xz",
-        "sha256": null,
+        "sha256": "a708f7c20ddd4a02ae1f3be716d79638f622ab47bd4167c1da4e199e019a3209",
         "exe": "brush-cli"
       }
     }
