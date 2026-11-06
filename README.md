@@ -70,9 +70,22 @@ pip install -r gausify-comfyui/requirements.txt
 ```
 
 Keep a folder name other than `gausify` (that name is the library package
-inside). Dependencies: numpy, scipy, opencv-python-headless 4.12, pillow, onnxruntime-gpu and
-COLMAP 4.2.1 (`pycolmap-cuda12` + CUDA runtime wheels). `brush-cli` is downloaded on first use into
+inside). Dependencies: numpy, scipy, opencv-python-headless (>= 4.12), pillow and
+onnxruntime-gpu. `brush-cli` is downloaded on first use into
 `ComfyUI/models/gausify/bin` (override with `GAUSIFY_BIN_DIR`).
+
+COLMAP (the `colmap` pose estimator) is not installed by `requirements.txt`.
+`pycolmap-cuda12` 4.2.1 needs CUDA 12 libraries (`cuda-toolkit<13`), which
+conflict with the CUDA 13 `cuda-toolkit` that recent torch builds pin, so
+installing it into ComfyUI's venv would break that environment. Instead, the first
+use of the `colmap` estimator creates an isolated venv and installs `pycolmap-cuda12`,
+`numpy` and the CUDA 12 runtime wheels there (a few hundred MB, needs network and
+pip access; your pip configuration, e.g. `PIP_INDEX_URL`, applies). COLMAP then runs
+in a subprocess from that venv; ComfyUI never imports it. The venv is at
+`$GAUSIFY_COLMAP_VENV` if set, else `ComfyUI/models/gausify/colmap-venv`
+(else `~/.cache/gausify/colmap-venv`), and is rebuilt automatically if the pinned
+packages change. `GAUSIFY_COLMAP_PIP_ARGS` adds arguments to its `pip install`
+(e.g. `--index-url https://...`). The AKAZE estimator needs none of this.
 
 Working files (frames, masks, COLMAP models) go to ComfyUI's temp folder,
 keyed by content, so re-running with the same inputs reuses the poses.

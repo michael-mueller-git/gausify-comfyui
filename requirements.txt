@@ -1,9 +1,8 @@
 # torch is provided by ComfyUI.
+# COLMAP (pycolmap-cuda12) is NOT listed: it needs CUDA 12 libraries that conflict with torch's
+# CUDA 13. It is installed on first use into its own venv (gausify/colmap_env.py).
 numpy
 onnxruntime-gpu>=1.20
 scipy
-opencv-python-headless==4.12.*
+opencv-python-headless>=4.12
 pillow
-pycolmap-cuda12==4.2.1
-nvidia-cuda-runtime-cu12
-nvidia-curand-cu12

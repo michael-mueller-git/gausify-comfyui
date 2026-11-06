@@ -1,5 +1,5 @@
-"""AKAZE feature extraction (OpenCV 4.12, same build of the algorithm as
-@techstark/opencv-js 4.12). Port of web/src/sfm/features.worker.ts.
+"""AKAZE feature extraction (parity target: OpenCV 4.12, the build of the algorithm in
+@techstark/opencv-js 4.12; other OpenCV versions may differ slightly). Port of web/src/sfm/features.worker.ts.
 
 Returns keypoints in original-image pixels (COLMAP convention, +0.5), binary
 descriptors (61 bytes = 486 bits) and each keypoint's color.

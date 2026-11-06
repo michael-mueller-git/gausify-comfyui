@@ -1,4 +1,4 @@
-"""The "colmap" pose estimator, on pycolmap.
+"""The "colmap" pose estimator, on pycolmap in an isolated venv.
 
 Port of gausify-orbit web/src/sfm/colmap-sfm.ts and the colmap-wasm package it
 uses (github.com/obraia/colmap-wasm: native/entry/web.cc, src/worker.ts,
@@ -18,24 +18,37 @@ src/estimate.ts, src/sift-matcher.ts). colmap-wasm runs:
   `view_graph_calibrator` (seeded) and `global_mapper` (GlobalPipelineOptions
   defaults), all with seed 0.
 
-Here the same COLMAP version (4.2.1) does the same steps natively. The raw
-matches (before verification) are returned, as colmapPoses does, for the
-orbit corrections (gausify.orbit.fill_missing).
+Here the same COLMAP version (4.2.1) does the same steps natively, but not in
+this process: pycolmap-cuda12 needs CUDA 12 libraries that conflict with
+ComfyUI's torch (CUDA 13), so `gausify/colmap_worker.py` runs it in a separate
+venv (`colmap_env.py`). This module writes the job, spawns the worker, relays
+its progress, and converts the result (read from an .npz) into an SfmModel,
+sampling the point colours with OpenCV. The raw matches (before verification)
+are returned, as colmapPoses does, for the orbit corrections
+(gausify.orbit.fill_missing).
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import os
+import queue
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import numpy as np
 
+from . import colmap_env
 from .types import Point3D, Pose, SfmModel
+
+log = logging.getLogger("gausify.sfm_colmap")
 
 #: Fixed seed: the same frames give the same cameras (colmap-sfm.ts SEED).
 SEED = 0
@@ -43,61 +56,20 @@ SEED = 0
 CAMERA_MODEL = "SIMPLE_PINHOLE"
 #: Images extracted per pycolmap call (progress granularity).
 EXTRACT_CHUNK = 16
+WORKER = Path(__file__).with_name("colmap_worker.py")
+#: Seconds the worker gets to exit after terminate() before it is killed.
+KILL_GRACE = 5.0
 
 Progress = Callable[[float, str], None] | None
 Cancel = Callable[[], bool] | None
 
 
-class Cancelled(Exception):
+class Cancelled(InterruptedError):
+    """Raised when `cancel()` returned True; the worker process was stopped."""
+
+
+class ColmapError(RuntimeError):
     pass
-
-
-def _pycolmap():
-    from .cuda_libs import import_pycolmap
-
-    return import_pycolmap()
-
-
-def use_gpu(pycolmap=None) -> bool:
-    """CUDA build of pycolmap and at least one CUDA device."""
-    pycolmap = pycolmap or _pycolmap()
-    if not getattr(pycolmap, "has_cuda", False):
-        return False
-    try:
-        return pycolmap.get_num_cuda_devices() > 0
-    except Exception:
-        return False
-
-
-class _CancelWatch:
-    """Turns `cancel()` polling into a pycolmap CancellationToken."""
-
-    def __init__(self, pycolmap, cancel: Cancel):
-        self.cancel = cancel
-        self.token = pycolmap.CancellationToken() if cancel and hasattr(pycolmap, "CancellationToken") else None
-        self._stop = threading.Event()
-        self._thread = None
-
-    def __enter__(self):
-        if self.token is not None:
-            def run():
-                while not self._stop.wait(0.2):
-                    if self.cancel():
-                        self.token.cancel()
-                        return
-
-            self._thread = threading.Thread(target=run, daemon=True)
-            self._thread.start()
-        return self
-
-    def __exit__(self, *exc):
-        self._stop.set()
-        if self._thread:
-            self._thread.join()
-
-    def check(self):
-        if self.cancel and self.cancel():
-            raise Cancelled("cancelled")
 
 
 def write_masks(masks_dir: Path, names: Sequence[str], out_dir: Path) -> Path:
@@ -121,109 +93,6 @@ def write_pairs(names: Sequence[str], pairs: Sequence[tuple[int, int]], path: Pa
     return path
 
 
-# ---------------------------------------------------------------- extraction / matching
-
-
-def _reader_options(pycolmap, masks: Path | None, existing_camera_id: int = -1):
-    o = pycolmap.ImageReaderOptions()
-    o.camera_model = CAMERA_MODEL
-    if masks is not None:
-        o.mask_path = str(masks)
-    if existing_camera_id >= 0:
-        o.existing_camera_id = existing_camera_id
-    return o
-
-
-def _extract_pycolmap(pycolmap, db, images_dir, names, masks, gpu, watch, progress):
-    ext = pycolmap.FeatureExtractionOptions()  # SIFT, COLMAP defaults
-    ext.use_gpu = gpu
-    device = pycolmap.Device.cuda if gpu else pycolmap.Device.cpu
-    camera_id = -1
-    for s in range(0, len(names), EXTRACT_CHUNK):
-        watch.check()
-        chunk = list(names[s : s + EXTRACT_CHUNK])
-        kw = {"cancellation_token": watch.token} if watch.token is not None else {}
-        pycolmap.extract_features(
-            str(db),
-            str(images_dir),
-            image_names=chunk,
-            camera_mode=pycolmap.CameraMode.SINGLE,
-            reader_options=_reader_options(pycolmap, masks, camera_id),
-            extraction_options=ext,
-            device=device,
-            **kw,
-        )
-        if camera_id < 0:
-            with pycolmap.Database.open(str(db)) as d:
-                camera_id = d.read_all_cameras()[0].camera_id
-        done = min(s + EXTRACT_CHUNK, len(names))
-        if progress:
-            progress(0.45 * done / len(names), f"COLMAP SIFT features {done}/{len(names)}")
-    watch.check()
-
-
-def _match_pycolmap(pycolmap, db, pairs_file, gpu, watch):
-    mo = pycolmap.FeatureMatchingOptions()  # SIFT brute force: ratio 0.8, distance 0.7, cross check
-    mo.use_gpu = gpu
-    po = pycolmap.ImportedPairingOptions()
-    po.match_list_path = str(pairs_file)
-    vo = pycolmap.TwoViewGeometryOptions()
-    vo.ransac.random_seed = SEED
-    kw = {"cancellation_token": watch.token} if watch.token is not None else {}
-    pycolmap.match_image_pairs(
-        str(db),
-        matching_options=mo,
-        pairing_options=po,
-        verification_options=vo,
-        device=pycolmap.Device.cuda if gpu else pycolmap.Device.cpu,
-        **kw,
-    )
-    watch.check()
-
-
-# ---------------------------------------------------------------- mapping
-
-
-def _map(pycolmap, db, images_dir, out_dir, n_images, watch, log):
-    vgc = pycolmap.ViewGraphCalibrationOptions()
-    vgc.random_seed = SEED
-    try:
-        if not pycolmap.calibrate_view_graph(str(db), vgc):
-            log("view graph calibration failed, continuing without it")
-    except Exception as e:  # as colmap-wasm: continue without it
-        log(f"view graph calibration failed, continuing without it ({e})")
-    watch.check()
-    opts = pycolmap.GlobalPipelineOptions()
-    opts.random_seed = SEED
-    out = Path(out_dir) / "global"
-    out.mkdir(parents=True, exist_ok=True)
-    recs = pycolmap.global_mapping(str(db), str(images_dir), str(out), opts)
-    rec, mapper = _largest(recs), "colmap"
-    if rec is None or rec.num_reg_images() < min(3, n_images):
-        watch.check()
-        log("global mapper registered fewer than 3 cameras; trying the incremental mapper")
-        io = pycolmap.IncrementalPipelineOptions()
-        io.random_seed = SEED
-        out = Path(out_dir) / "incremental"
-        out.mkdir(parents=True, exist_ok=True)
-        kw = {"cancellation_token": watch.token} if watch.token is not None else {}
-        recs2 = pycolmap.incremental_mapping(str(db), str(images_dir), str(out), io, **kw)
-        rec2 = _largest(recs2)
-        if rec2 is not None and (rec is None or rec2.num_reg_images() > rec.num_reg_images()):
-            rec, mapper = rec2, "colmap-incremental"
-    watch.check()
-    return rec, mapper
-
-
-def _largest(recs):
-    if not recs:
-        return None
-    return max(recs.values(), key=lambda r: r.num_reg_images())
-
-
-# ---------------------------------------------------------------- conversion
-
-
 def _rgb_u8(images_dir: Path, name: str) -> np.ndarray:
     import cv2
 
@@ -233,70 +102,44 @@ def _rgb_u8(images_dir: Path, name: str) -> np.ndarray:
     return cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
 
 
-def _read_db(pycolmap, db, names):
-    """Image ids, keypoints (N,2) and raw matches by input index."""
-    index = {n: i for i, n in enumerate(names)}
-    with pycolmap.Database.open(str(db)) as d:
-        images = d.read_all_images()
-        cams = d.read_all_cameras()
-        id_to_idx = {im.image_id: index[im.name] for im in images if im.name in index}
-        xy: list[np.ndarray] = [np.zeros((0, 2), np.float32) for _ in names]
-        for iid, i in id_to_idx.items():
-            k = np.asarray(d.read_keypoints(iid), np.float32)
-            xy[i] = np.ascontiguousarray(k[:, :2]) if k.size else np.zeros((0, 2), np.float32)
-        pair_ids, mats = d.read_all_matches()
-    matches = []
-    for pid, m in zip(pair_ids, mats):
-        id1, id2 = pycolmap.pair_id_to_image_pair(pid)
-        if id1 not in id_to_idx or id2 not in id_to_idx:
-            continue
-        a, b = id_to_idx[id1], id_to_idx[id2]
-        idx = np.asarray(m, np.int64).reshape(-1, 2).astype(np.int32)
-        if a > b:
-            a, b, idx = b, a, idx[:, ::-1].copy()
-        matches.append({"a": a, "b": b, "idx": idx})
-    matches.sort(key=lambda m: (m["a"], m["b"]))
-    return id_to_idx, xy, matches, cams
-
-
-def to_model(rec, names, id_to_idx, xy, images_dir, width, height, mapper="colmap") -> SfmModel:
-    """Reconstruction -> SfmModel, like toModel in colmap-sfm.ts (point colors
-    from the image at the first track element's keypoint, as colmap-wasm)."""
+def to_model(res, names, images_dir, width, height, mapper="colmap") -> SfmModel:
+    """Worker result (dict of arrays, see colmap_worker.save_result) -> SfmModel,
+    like toModel in colmap-sfm.ts (point colors from the image at the first
+    track element's keypoint, as colmap-wasm)."""
     n = len(names)
     poses: list[Pose | None] = [None] * n
-    if rec is not None:
-        cam = next(iter(rec.cameras.values()))
-        f, cx, cy = float(cam.mean_focal_length()), float(cam.principal_point_x), float(cam.principal_point_y)
-        for iid in rec.reg_image_ids():
-            if iid not in id_to_idx:
-                continue
-            im = rec.images[iid]
-            T = im.cam_from_world()
-            M = np.asarray(T.matrix(), np.float64)
-            poses[id_to_idx[iid]] = Pose(R=M[:, :3].copy(), t=M[:, 3].copy())
+    has_rec = bool(res["has_rec"])
+    if has_rec:
+        f, cx, cy = (float(v) for v in res["camera"])
+        for i in range(n):
+            M = res["poses"][i]
+            if not np.isnan(M).any():
+                poses[i] = Pose(R=M[:, :3].copy(), t=M[:, 3].copy())
     else:
         f, cx, cy = 1.2 * max(width, height), width / 2, height / 2
+
+    off = np.concatenate([[0], np.cumsum(res["xy_counts"])])
+    xy = [np.ascontiguousarray(res["xy_flat"][off[i] : off[i + 1]], np.float32) for i in range(n)]
 
     cache: dict[int, np.ndarray] = {}
     points: list[Point3D] = []
     obs_total, err_sum = 0, 0.0
-    if rec is not None:
-        for _, p in sorted(rec.points3D.items()):
-            track = [(id_to_idx[e.image_id], int(e.point2D_idx)) for e in p.track.elements if e.image_id in id_to_idx]
-            if not track:
-                continue
-            i0, k0 = track[0]
-            if i0 not in cache:
-                cache[i0] = _rgb_u8(images_dir, names[i0])
-            img = cache[i0]
-            H, W = img.shape[:2]
-            x = min(W - 1, max(0, int(np.floor(xy[i0][k0, 0]))))
-            y = min(H - 1, max(0, int(np.floor(xy[i0][k0, 1]))))
-            rgb = tuple(int(c) for c in img[y, x])
-            err = float(p.error)
-            obs_total += len(track)
-            err_sum += err * len(track)
-            points.append(Point3D(X=np.asarray(p.xyz, np.float64).copy(), rgb=rgb, obs=track, error=err))
+    t_off = np.concatenate([[0], np.cumsum(res["track_counts"])])
+    for j in range(len(res["track_counts"])):
+        sl = slice(t_off[j], t_off[j + 1])
+        track = [(int(a), int(b)) for a, b in zip(res["track_img"][sl], res["track_kp"][sl])]
+        i0, k0 = track[0]
+        if i0 not in cache:
+            cache[i0] = _rgb_u8(images_dir, names[i0])
+        img = cache[i0]
+        H, W = img.shape[:2]
+        x = min(W - 1, max(0, int(np.floor(xy[i0][k0, 0]))))
+        y = min(H - 1, max(0, int(np.floor(xy[i0][k0, 1]))))
+        rgb = tuple(int(c) for c in img[y, x])
+        err = float(res["error"][j])
+        obs_total += len(track)
+        err_sum += err * len(track)
+        points.append(Point3D(X=np.asarray(res["xyz"][j], np.float64).copy(), rgb=rgb, obs=track, error=err))
     registered = sum(1 for q in poses if q is not None)
     stats = {
         "registered": registered,
@@ -313,6 +156,109 @@ def to_model(rec, names, id_to_idx, xy, images_dir, width, height, mapper="colma
                     names=list(names), xy=xy, stats=stats)
 
 
+def _matches(res) -> list[dict]:
+    off = np.concatenate([[0], np.cumsum(res["match_counts"])])
+    return [
+        {"a": int(a), "b": int(b), "idx": np.ascontiguousarray(res["match_idx"][off[k] : off[k + 1]], np.int32)}
+        for k, (a, b) in enumerate(res["match_ab"])
+    ]
+
+
+def run_worker(
+    job_path: Path, progress: Progress = None, cancel: Cancel = None, log_fn: Callable[[str], None] | None = None,
+    python: str | os.PathLike | None = None,
+) -> dict:
+    """Run colmap_worker.py on `job_path` with the venv python; returns the
+    worker's `result` event. Progress events go to `progress`, `log` events to
+    `log_fn`; `cancel()` is polled and terminates the process (Cancelled)."""
+    python = python or colmap_env.ensure_colmap_env(progress)
+    cmd = [str(python), "-I", str(WORKER), str(job_path)]
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    tail: deque[str] = deque(maxlen=60)
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def pump_out():
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    def pump_err():
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            tail.append(line.rstrip("\n"))
+
+    threads = [threading.Thread(target=pump_out, daemon=True), threading.Thread(target=pump_err, daemon=True)]
+    for t in threads:
+        t.start()
+    result: dict | None = None
+    error: dict | None = None
+
+    def stop():
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(KILL_GRACE)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+    try:
+        while True:
+            if cancel is not None and cancel():
+                stop()
+                raise Cancelled("COLMAP cancelled")
+            try:
+                line = lines.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if line is None:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+                kind = ev["type"]
+            except (ValueError, KeyError, TypeError):
+                tail.append(line)
+                continue
+            if kind == "progress":
+                if progress:
+                    progress(float(ev["fraction"]), str(ev.get("message", "")))
+            elif kind == "log":
+                (log_fn or log.info)(str(ev.get("message", "")))
+            elif kind == "result":
+                result = ev
+            elif kind == "error":
+                error = ev
+        rc = proc.wait()
+    except BaseException:
+        stop()
+        raise
+    for t in threads:
+        t.join(timeout=5)
+    if rc != 0 or result is None:
+        msg = f"COLMAP worker failed (exit code {rc})"
+        if error:
+            msg += f": {error.get('message')}"
+            if error.get("traceback"):
+                msg += "\n" + str(error["traceback"]).rstrip()
+        if tail:
+            msg += "\n" + "\n".join(tail)
+        raise ColmapError(msg)
+    return result
+
+
 # ---------------------------------------------------------------- entry point
 
 
@@ -327,46 +273,47 @@ def colmap_poses_with_matches(
     work_dir=None,
 ) -> tuple[SfmModel, list[dict]]:
     """colmap_poses plus the raw matches ({"a","b","idx": (M,2) int32})."""
-    log = log or (lambda s: None)
-    pycolmap = _pycolmap()
+    say = log or (lambda s: None)
     names = list(names)
-    images_dir = Path(images_dir)
+    images_dir = Path(images_dir).resolve()
     if len(names) < 2:
         raise ValueError("need at least 2 images")
     probe = _rgb_u8(images_dir, names[0])
     height, width = probe.shape[:2]
-    gpu = use_gpu(pycolmap)
+    python = colmap_env.ensure_colmap_env(progress)
     tmp = tempfile.TemporaryDirectory(prefix="gausify-colmap-", dir=work_dir)
     work = Path(tmp.name)
     try:
-        db = work / "database.db"
         masks = write_masks(Path(masks_dir), names, work / "masks") if masks_dir else None
         pairs_file = write_pairs(names, pairs, work / "pairs.txt")
-        with _CancelWatch(pycolmap, cancel) as watch:
-            t0 = time.perf_counter()
-            if progress:
-                progress(0.0, "COLMAP SIFT features")
-            _extract_pycolmap(pycolmap, db, images_dir, names, masks, gpu, watch, progress)
-            t1 = time.perf_counter()
-            if progress:
-                progress(0.45, "COLMAP SIFT matching")
-            _match_pycolmap(pycolmap, db, pairs_file, gpu, watch)
-            id_to_idx, xy, matches, _ = _read_db(pycolmap, db, names)
-            mean_feat = sum(len(k) for k in xy) / len(xy)
-            log(f"COLMAP SIFT features: mean {mean_feat:.0f}/image in {t1 - t0:.1f} s ({'GPU' if gpu else 'CPU'})")
-            t2 = time.perf_counter()
-            mean_m = sum(len(m["idx"]) for m in matches) / max(len(matches), 1)
-            log(f"SIFT matching: {len(pairs)} pairs, mean {mean_m:.0f} matches in {t2 - t1:.1f} s")
-            if progress:
-                progress(0.55, "COLMAP global mapper")
-            pycolmap.set_random_seed(SEED)
-            rec, mapper = _map(pycolmap, db, images_dir, work, len(names), watch, log)
-        model = to_model(rec, names, id_to_idx, xy, images_dir, width, height, mapper)
+        job = {
+            "images_dir": str(images_dir),
+            "names": names,
+            "masks_dir": str(masks) if masks else None,
+            "pairs_file": str(pairs_file),
+            "n_pairs": len(pairs),
+            "database": str(work / "database.db"),
+            "work_dir": str(work),
+            "result": str(work / "result.npz"),
+            "seed": SEED,
+            "camera_model": CAMERA_MODEL,
+            "extract_chunk": EXTRACT_CHUNK,
+        }
+        job_path = work / "job.json"
+        job_path.write_text(json.dumps(job), encoding="utf-8")
+        t0 = time.perf_counter()
+        res = run_worker(job_path, progress, cancel, say, python=python)
+        with np.load(res["result"]) as z:
+            arrays = {k: z[k] for k in z.files}
+        mapper = res.get("mapper", "colmap")
+        model = to_model(arrays, names, images_dir, width, height, mapper)
+        model.stats["backend"] = res.get("backend")
+        matches = _matches(arrays)
         s = model.stats
-        log(
+        say(
             f"COLMAP {'global' if mapper == 'colmap' else 'incremental'} mapper: {s['registered']}/{len(names)} cameras, "
             f"{s['points']} points, mean error {s['meanError']:.2f} px, f = {model.f:.1f} "
-            f"in {time.perf_counter() - t2:.1f} s"
+            f"in {res.get('seconds_mapping', time.perf_counter() - t0):.1f} s"
         )
         if progress:
             progress(1.0, "COLMAP done")

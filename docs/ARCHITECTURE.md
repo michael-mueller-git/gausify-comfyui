@@ -11,10 +11,11 @@ source .dev/env.sh        # uv venv in .venv on a Nix python + LD_LIBRARY_PATH f
 uv pip install <pkg>      # wheels only; never build Python packages from source
 pytest -q tests && ruff check .
 ```
-Installed: numpy, scipy, opencv-python-headless 4.12, pillow, pytest, ruff, torch 2.15 (CPU),
-pycolmap-cuda12 4.2.1 (+ nvidia-cuda-runtime-cu12, nvidia-curand-cu12),
+Installed: numpy, scipy, opencv-python-headless (>= 4.12), pillow, pytest, ruff, torch 2.15 (CPU),
 onnxruntime (CPU wheel, NOT onnxruntime-gpu) and onnx for the masking tests.
 Rust (for brush-cli): `nix shell nixpkgs#rustc nixpkgs#cargo nixpkgs#cargo-zigbuild` (rustc 1.95).
+pycolmap is NOT installed in the dev venv: the slow COLMAP tests build the worker venv
+(`GAUSIFY_COLMAP_VENV=$PWD/.dev/colmap-venv pytest -m slow tests/test_sfm_colmap.py` to keep it between runs).
 No gsplat: there are no prebuilt wheels for current torch; all rendering goes through brush-cli.
 
 Shared types: `gausify/types.py` (`Pose`, `Point3D`, `SfmModel`, `OrbitTimes`, `OrbitCameras`).
@@ -45,9 +46,11 @@ Rules for every module:
 | `gausify/masking/sam2_math.py` | constants, `parse_params`, `round_bf16`, `pointer_pos_enc`, `fix_vision_shape`, `to_seq`/`to_nchw`, `logits_to_mask`, `prompt_frame`, `prompt_pixels` (`assets/sam2-params.bin` vendored) | `web/src/pipeline/sam2-math.ts` |
 | `gausify/masking/sam2.py` | `Sam2Tracker` (memory bank on ONNX Runtime), `sam2_masks(frames_u8, prompt, prompt_frame, variant, progress, cancel, sessions=None) -> (masks, stats)`; fp32/fp16 graphs from `models.json` | `web/src/pipeline/sam2.ts`, `masks.ts` (`sam2Masks`) |
 | `gausify/brush.py` | `train(dataset_dir, args: list[str], out_ply, init_ply=None, progress, cancel) -> dict(psnr: float|None, splats: int)` runs `brush-cli`; `render(ply, cameras: list[dict(R,t,f,cx,cy,width,height)]) -> list[dict(rgba: (H,W,4) float32, depth: (H,W) float32)]` runs `brush-cli render` (our patch `brush/patches/gausify-cli.patch`, same renderer as `renderColor`/`renderDepth` in render.patch/geom.patch) | — |
-| `gausify/cuda_libs.py` | `preload()` — ctypes-loads `libcudart.so.12`/`libcurand.so.10` from the `nvidia-*-cu12` wheels (RTLD_GLOBAL) before `import pycolmap` | — |
+| `gausify/cuda_libs.py` | `preload()` — ctypes-loads `libcudart.so.12`/`libcurand.so.10` from the `nvidia-*-cu12` wheels (RTLD_GLOBAL) before `import pycolmap`; used only inside the COLMAP worker venv | — |
+| `gausify/colmap_env.py` | `ensure_colmap_env(progress) -> Path` (python of the COLMAP worker venv): created on first use with `python -m venv` (fallback `uv venv`), pip-installs `pycolmap-cuda12==4.2.1`, numpy and the CUDA 12 wheels; location `$GAUSIFY_COLMAP_VENV`, else `ComfyUI/models/gausify/colmap-venv`, else `~/.cache/gausify/colmap-venv`; `$GAUSIFY_COLMAP_PIP_ARGS`; lock, spec-hash stamp (rebuild on change), atomic rename | — |
+| `gausify/colmap_worker.py` | standalone script run as `<venv>/bin/python -I colmap_worker.py job.json`: SIFT extraction, matching of the given pairs, view-graph calibration, global (else incremental) mapping with pycolmap; stdout = JSON lines (`progress`, `log`, `result`, `error`), pycolmap noise on stderr; writes an `.npz` (camera, poses, keypoints, raw matches, points/tracks) | `web/src/sfm/colmap-sfm.ts`, colmap-wasm |
 | `gausify/models.json`, `downloader.ensure_model(name) -> Path` | ONNX model specs (url, sha256, bytes; the only copy) and their download: size + sha256 checked, atomic rename, lock; cache `$GAUSIFY_MODEL_DIR`, else `ComfyUI/models/gausify/models`, else `~/.cache/gausify/models`; `$GAUSIFY_MODEL_<NAME>` = local file | `web/src/pipeline/segment.ts` (downloadModel) |
-| `gausify/sfm_colmap.py` | `colmap_poses(images_dir, names, masks_dir|None, pairs, progress, cancel) -> SfmModel` (pycolmap-cuda12) | `web/src/sfm/colmap-sfm.ts` |
+| `gausify/sfm_colmap.py` | `colmap_poses(images_dir, names, masks_dir|None, pairs, progress, cancel) -> SfmModel`; writes job.json, spawns the worker (progress relayed, `cancel()` terminates it, non-zero exit raises `ColmapError` with the stderr tail), builds the `SfmModel` from the `.npz` (colours via cv2). The main process never imports pycolmap | `web/src/sfm/colmap-sfm.ts` |
 | `gausify/sfm_akaze/` | `akaze_poses(images_dir, names, masks_dir|None, pairs, max_side, max_features, progress, cancel) -> (SfmModel, matches)` | `web/src/sfm/{features.worker,matcher,geometry,linalg,reconstruct,ba}.ts` |
 | `gausify/sfm.py` | `run_sfm(images_dir, names, masks_dir, estimator, window, closed_loop, flat_orbit, fill_missing, times) -> SfmModel` (pairs -> estimator -> flatten/fill -> stats) | `web/src/sfm/index.ts` (`runSfm`) |
 | `gausify/posecheck/` | `check_poses(cams: OrbitCameras, mode: "auto"|"always", progress, cancel) -> dict|None` | `web/src/posecheck/*`, docs/web.md "Pose check" |
@@ -57,5 +60,5 @@ Rules for every module:
 
 - `brush-cli` built by `.github/workflows/build-brush.yml` from Brush `38185dedaf8143988a31a64c1f27c2323b1febdf`
   with `brush/patches/{brush-js,geom,deg,render}.patch` (order of `$REF/scripts/build-brush-web.mjs`) then `gausify-cli.patch`.
-- COLMAP: `pycolmap-cuda12==4.2.1` (pip). Linux x86-64 only.
+- COLMAP: `pycolmap-cuda12==4.2.1` (pip) in its own venv (`gausify/colmap_env.py`), because it needs `cuda-toolkit<13` while ComfyUI's torch pins CUDA 13. Linux x86-64 only.
 - Models (RMBG-1.4, SAM 2.1 tiny fp32/fp16): downloaded by `ensure_model` into the models cache above (see `gausify/models.json`).

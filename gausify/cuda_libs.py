@@ -5,6 +5,9 @@ loader path; pip installs them in the nvidia-cuda-runtime-cu12 and
 nvidia-curand-cu12 wheels (site-packages/nvidia/*/lib), which the loader does
 not search. Loading them with RTLD_GLOBAL first makes `import pycolmap` work
 without touching LD_LIBRARY_PATH. No-op outside Linux.
+
+Only used inside the COLMAP worker (gausify/colmap_worker.py, run by the isolated
+venv of colmap_env.py); the main ComfyUI process never imports pycolmap.
 """
 
 from __future__ import annotations

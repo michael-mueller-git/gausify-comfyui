@@ -3,27 +3,35 @@
 
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 cv2 = pytest.importorskip("cv2")
+# Import the library first: pytest would otherwise import the repo root __init__.py as "gausify".
+import gausify.sfm_colmap  # noqa: E402,F401
 
+REPO_DIR = Path(__file__).resolve().parents[1]
 W, H, F = 480, 360, 420.0
 N = 24
 RADIUS, HEIGHT = 4.0, 1.4
 
 
-def _pycolmap_ok() -> bool:
-    try:
-        from gausify.cuda_libs import import_pycolmap
+@pytest.fixture(scope="module")
+def colmap_venv(tmp_path_factory):
+    """The real worker venv (built on first use: needs network). Set
+    GAUSIFY_COLMAP_VENV to reuse one between runs."""
+    mp = pytest.MonkeyPatch()
+    if not os.environ.get("GAUSIFY_COLMAP_VENV"):
+        mp.setenv("GAUSIFY_COLMAP_VENV", str(tmp_path_factory.mktemp("colmap") / "venv"))
+    yield
+    mp.undo()
 
-        import_pycolmap()
-        return True
-    except Exception:
-        return False
 
-
-needs_pycolmap = pytest.mark.skipif(not _pycolmap_ok(), reason="pycolmap not importable")
+needs_pycolmap = pytest.mark.slow
 
 
 def _texture(seed: int, size: int = 512) -> np.ndarray:
@@ -162,7 +170,7 @@ def test_circle_residual_sanity():
 
 
 @needs_pycolmap
-def test_colmap_poses_synthetic_orbit(orbit):
+def test_colmap_poses_synthetic_orbit(orbit, colmap_venv):
     from gausify.sfm_colmap import colmap_poses_with_matches
 
     d, names, _ = orbit
@@ -170,7 +178,7 @@ def test_colmap_poses_synthetic_orbit(orbit):
     steps = []
     model, matches = colmap_poses_with_matches(d / "images", names, None, pairs, progress=lambda f, m: steps.append(f))
     s = model.stats
-    assert s["total"] == N and s["mapper"] == "colmap"
+    assert s["total"] == N and s["mapper"] == "colmap" and s["backend"] in ("CPU", "GPU")
     assert s["registered"] >= int(0.8 * N), s
     assert len(model.poses) == N and len(model.xy) == N
     assert abs(model.f - F) / F < 0.1, model.f
@@ -186,7 +194,7 @@ def test_colmap_poses_synthetic_orbit(orbit):
 
 
 @needs_pycolmap
-def test_colmap_poses_with_masks(orbit, tmp_path):
+def test_colmap_poses_with_masks(orbit, tmp_path, colmap_venv):
     from gausify.sfm_colmap import colmap_poses
 
     d, names, _ = orbit
@@ -203,7 +211,7 @@ def test_colmap_poses_with_masks(orbit, tmp_path):
 
 
 @needs_pycolmap
-def test_run_sfm_colmap(orbit, tmp_path):
+def test_run_sfm_colmap(orbit, tmp_path, colmap_venv):
     pytest.importorskip("gausify.pairs")
     pytest.importorskip("gausify.orbit")
     pytest.importorskip("gausify.colmap_io")
@@ -220,3 +228,205 @@ def test_run_sfm_colmap(orbit, tmp_path):
     assert sum(p is not None for p in back.poses) == sum(p is not None for p in model.poses)
     assert any("COLMAP global mapper" in s for s in lines)
     assert model.stats.get("flat") == 1
+
+
+# ---------------------------------------------------------------- fast tests (fake worker)
+
+FAKE_WORKER = r"""
+import json, sys, time, os
+job = json.load(open(sys.argv[1]))
+mode = job["mode"]
+out = os.fdopen(os.dup(1), "w"); os.dup2(2, 1)
+def emit(**e): out.write(json.dumps(e) + "\n"); out.flush()
+print("glog noise", flush=True)
+if mode == "ok":
+    emit(type="progress", fraction=0.25, message="a")
+    emit(type="log", message="hello")
+    emit(type="progress", fraction=0.5, message="b")
+    emit(type="result", backend="CPU", mapper="colmap", result="r.npz")
+elif mode == "error":
+    emit(type="error", message="ValueError: boom", traceback="Traceback...\nValueError: boom")
+    sys.exit(1)
+elif mode == "crash":
+    print("segfault-ish stderr line", file=sys.stderr, flush=True)
+    sys.exit(139)
+elif mode == "hang":
+    open(job["pidfile"], "w").write(str(os.getpid()))
+    emit(type="progress", fraction=0.1, message="started")
+    time.sleep(60)
+"""
+
+
+@pytest.fixture
+def fake(tmp_path, monkeypatch):
+    from gausify import sfm_colmap
+
+    w = tmp_path / "fake_worker.py"
+    w.write_text(FAKE_WORKER)
+    monkeypatch.setattr(sfm_colmap, "WORKER", w)
+
+    def run(mode, **kw):
+        job = tmp_path / "job.json"
+        import json
+
+        job.write_text(json.dumps({"mode": mode, "pidfile": str(tmp_path / "pid")}))
+        return sfm_colmap.run_worker(job, python=sys.executable, **kw)
+
+    return run
+
+
+def test_worker_protocol_progress_and_log(fake):
+    steps, logs = [], []
+    res = fake("ok", progress=lambda f, m: steps.append((f, m)), log_fn=logs.append)
+    assert steps == [(0.25, "a"), (0.5, "b")]
+    assert logs == ["hello"]
+    assert res["backend"] == "CPU" and res["result"] == "r.npz"
+
+
+def test_worker_error_event(fake):
+    from gausify.sfm_colmap import ColmapError
+
+    with pytest.raises(ColmapError, match="ValueError: boom") as e:
+        fake("error")
+    assert "Traceback" in str(e.value) and "glog noise" in str(e.value)
+
+
+def test_worker_crash_reports_stderr_tail(fake):
+    from gausify.sfm_colmap import ColmapError
+
+    with pytest.raises(ColmapError, match="exit code 139") as e:
+        fake("crash")
+    assert "segfault-ish stderr line" in str(e.value)
+
+
+def test_worker_cancel_kills_process(fake, tmp_path):
+    import time
+
+    from gausify.sfm_colmap import Cancelled
+
+    t0 = time.time()
+    state = {"n": 0}
+
+    def cancel():
+        pid = tmp_path / "pid"
+        return pid.exists() and pid.read_text() != "" and (state.update(n=state["n"] + 1) or state["n"] > 3)
+
+    with pytest.raises(Cancelled):
+        fake("hang", cancel=cancel)
+    assert time.time() - t0 < 30
+    pid = int((tmp_path / "pid").read_text())
+    with pytest.raises(OSError):  # reaped: no such process
+        os.kill(pid, 0)
+
+
+def test_colmap_poses_does_not_import_pycolmap():
+    import subprocess
+
+    code = "import sys, gausify.sfm_colmap, gausify.sfm; assert 'pycolmap' not in sys.modules"
+    subprocess.run([sys.executable, "-c", code], check=True, cwd=str(REPO_DIR))
+
+
+def test_to_model_from_arrays(tmp_path):
+    from gausify.sfm_colmap import _matches, to_model
+
+    cv2.imwrite(str(tmp_path / "a.png"), np.full((10, 20, 3), (10, 20, 30), np.uint8))  # BGR
+    cv2.imwrite(str(tmp_path / "b.png"), np.zeros((10, 20, 3), np.uint8))
+    poses = np.full((2, 3, 4), np.nan)
+    poses[0] = np.c_[np.eye(3), [1, 2, 3]]
+    res = {
+        "has_rec": np.array(True),
+        "camera": np.array([24.0, 10.0, 5.0]),
+        "poses": poses,
+        "xy_flat": np.array([[3.7, 4.2], [1, 1]], np.float32),
+        "xy_counts": np.array([1, 1]),
+        "xyz": np.array([[0, 0, 1.0]]),
+        "error": np.array([0.5]),
+        "track_counts": np.array([2]),
+        "track_img": np.array([0, 1]),
+        "track_kp": np.array([0, 0]),
+        "match_ab": np.array([[0, 1]]),
+        "match_counts": np.array([1]),
+        "match_idx": np.array([[0, 0]], np.int32),
+    }
+    m = to_model(res, ["a.png", "b.png"], tmp_path, 20, 10)
+    assert m.poses[1] is None and m.poses[0].t.tolist() == [1, 2, 3]
+    assert m.points[0].rgb == (30, 20, 10) and m.points[0].obs == [(0, 0), (1, 0)]
+    assert m.stats["registered"] == 1 and m.stats["observations"] == 2 and m.f == 24.0
+    mm = _matches(res)
+    assert mm[0]["a"] == 0 and mm[0]["idx"].dtype == np.int32
+
+
+# ---------------------------------------------------------------- colmap_env
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    from gausify import colmap_env
+
+    venv = tmp_path / "models" / "venv"
+    monkeypatch.setenv("GAUSIFY_COLMAP_VENV", str(venv))
+    monkeypatch.delenv("GAUSIFY_COLMAP_PIP_ARGS", raising=False)
+    calls = []
+
+    def fake_create(path, tail, on_line):
+        (path / "bin").mkdir(parents=True)
+        (path / "bin" / "python").write_text("")
+
+    def fake_run(cmd, tail, on_line):
+        calls.append(cmd)
+        on_line("Collecting pycolmap-cuda12")
+        return 0
+
+    monkeypatch.setattr(colmap_env, "_create_venv", fake_create)
+    monkeypatch.setattr(colmap_env, "_run_logged", fake_run)
+    return colmap_env, venv, calls
+
+
+def test_env_location_precedence(tmp_path, monkeypatch):
+    from gausify import colmap_env
+
+    monkeypatch.setenv("GAUSIFY_COLMAP_VENV", str(tmp_path / "x"))
+    assert colmap_env.venv_dir() == tmp_path / "x"
+    monkeypatch.delenv("GAUSIFY_COLMAP_VENV")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert colmap_env.venv_dir() == tmp_path / ".cache" / "gausify" / "colmap-venv"
+
+
+def test_env_builds_once_and_reuses(env):
+    colmap_env, venv, calls = env
+    steps = []
+    py = colmap_env.ensure_colmap_env(lambda f, m: steps.append(m))
+    assert py == venv / "bin" / "python" and py.is_file()
+    assert len(calls) == 1 and calls[0][1:5] == ["-m", "pip", "install", "--disable-pip-version-check"]
+    assert "pycolmap-cuda12==4.2.1" in calls[0] and "nvidia-curand-cu12" in calls[0]
+    assert any("Collecting" in m for m in steps)
+    assert not [p for p in venv.parent.iterdir() if p.name.startswith(".venv-")]  # temp dir renamed away
+    colmap_env.ensure_colmap_env()
+    assert len(calls) == 1
+
+
+def test_env_rebuilds_when_spec_changes(env, monkeypatch):
+    colmap_env, venv, calls = env
+    colmap_env.ensure_colmap_env()
+    (venv / "marker").write_text("old")
+    monkeypatch.setenv("GAUSIFY_COLMAP_PIP_ARGS", "--index-url https://example.invalid/simple")
+    colmap_env.ensure_colmap_env()
+    assert len(calls) == 2 and "--index-url" in calls[1]
+    assert not (venv / "marker").exists()
+    colmap_env.ensure_colmap_env(packages=(*colmap_env.PACKAGES, "extra"))
+    assert len(calls) == 3
+
+
+def test_env_failure_message(env, monkeypatch):
+    colmap_env, venv, _ = env
+
+    def bad(cmd, tail, on_line):
+        tail.append("ERROR: no matching distribution")
+        return 1
+
+    monkeypatch.setattr(colmap_env, "_run_logged", bad)
+    with pytest.raises(colmap_env.ColmapEnvError) as e:
+        colmap_env.ensure_colmap_env()
+    msg = str(e.value)
+    assert "no matching distribution" in msg and "-m pip install" in msg and "pycolmap-cuda12==4.2.1" in msg
+    assert not venv.exists()

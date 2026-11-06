@@ -24,7 +24,7 @@ same license.
 ## COLMAP — BSD 3-Clause License
 
 <https://github.com/colmap/colmap>, Copyright (c) 2023, ETH Zurich and UNC
-Chapel Hill. Used through `pycolmap-cuda12` 4.2.1 (pip). COLMAP bundles further third-party code under its own licenses
+Chapel Hill. Used through `pycolmap-cuda12` 4.2.1 (pip, installed on first use into a separate venv). COLMAP bundles further third-party code under its own licenses
 (see its repository).
 
 ## NVIDIA CUDA runtime libraries
