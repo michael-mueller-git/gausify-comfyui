@@ -78,7 +78,8 @@ can use CUDA. Options:
   place, the check also tests that CUDA actually initialises.
 - `--colmap`: also builds the COLMAP venv (see below).
 
-`PYTHON=/path/to/python` uses that interpreter instead of the active venv.
+Without an active venv it uses `venv/` or `.venv/` next to ComfyUI (or the base directory), or
+`/comfy/mnt/venv`; `PYTHON=/path/to/python` selects the interpreter explicitly.
 Running the script again is safe. Restart ComfyUI afterwards.
 
 Manual install instead: `pip install -r gausify-comfyui/requirements.txt`.

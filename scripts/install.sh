@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Install everything gausify-comfyui needs into ComfyUI's Python env, then check it.
 #
-# Usage (with ComfyUI's venv active, or PYTHON=/path/to/ComfyUI/venv/bin/python):
+# Usage (with ComfyUI's venv active, or PYTHON=/path/to/ComfyUI/venv/bin/python; without
+# either it looks for venv/ or .venv/ next to ComfyUI, and /comfy/mnt/venv):
 #   scripts/install.sh [--models] [--colmap]
 #
 #   --models   also download the ONNX mask models (SAM 2.1 fp32, RMBG-1.4; ~350 MB)
@@ -27,7 +28,7 @@ for arg in "$@"; do
     case "$arg" in
         --models) want_models=1 ;;
         --colmap) want_colmap=1 ;;
-        -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "error: unknown argument $arg (see --help)" >&2; exit 2 ;;
     esac
 done
@@ -37,8 +38,20 @@ if [[ -n "${PYTHON:-}" ]]; then
 elif [[ -n "${VIRTUAL_ENV:-}" ]]; then
     python="$VIRTUAL_ENV/bin/python"
 else
-    echo "error: activate ComfyUI's venv or set PYTHON=/path/to/ComfyUI/venv/bin/python" >&2
-    exit 2
+    # No venv active: look for ComfyUI's venv in the usual places (next to
+    # ComfyUI or the base directory, and /comfy/mnt/venv of the Docker images).
+    base="$(cd "$repo/../.." && pwd)"
+    for v in "$base/venv" "$base/.venv" "$base/../venv" "$base/../.venv" /comfy/mnt/venv; do
+        if [[ -x "$v/bin/python" ]]; then
+            python="$(cd "$v" && pwd)/bin/python"
+            echo "using ComfyUI venv $(dirname "$(dirname "$python")") (activate another venv or set PYTHON to override)"
+            break
+        fi
+    done
+    if [[ -z "${python:-}" ]]; then
+        echo "error: no ComfyUI venv found; activate it or set PYTHON=/path/to/ComfyUI/venv/bin/python" >&2
+        exit 2
+    fi
 fi
 pip=("$python" -m pip)
 
