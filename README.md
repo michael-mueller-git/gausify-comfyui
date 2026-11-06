@@ -90,36 +90,22 @@ packages change. `GAUSIFY_COLMAP_PIP_ARGS` adds arguments to its `pip install`
 ### COLMAP environment: set up ahead of time
 
 To build the COLMAP venv before the first run (e.g. to see pip's output, or on
-a machine where ComfyUI has no network), run the node's own setup with
-ComfyUI's Python. It creates the venv exactly as the node expects:
+a machine where ComfyUI has no network), run the setup script with ComfyUI's
+venv active. It runs the node's own setup, so the venv is exactly what the node
+expects, and then checks that COLMAP sees the GPU:
 
 ```bash
 source /path/to/ComfyUI/venv/bin/activate
-cd ComfyUI/custom_nodes/gausify-comfyui
-GAUSIFY_COLMAP_VENV=/path/to/ComfyUI/models/gausify/colmap-venv \
-python -c "
-import logging; logging.basicConfig(level=logging.INFO)
-from gausify.colmap_env import ensure_colmap_env
-print('ready:', ensure_colmap_env())
-"
+ComfyUI/custom_nodes/gausify-comfyui/scripts/setup-colmap-env.sh
 ```
 
-Set `GAUSIFY_COLMAP_VENV` explicitly here: outside ComfyUI the default falls
-back to `~/.cache`. If you choose a path other than `ComfyUI/models/gausify/colmap-venv`,
-export the same variable for ComfyUI too. Use ComfyUI's Python: the venv is
-stamped with its version and rebuilt if it differs. Don't create it with a plain
+It prints `cuda build: True | devices: 1` (or more) on success and exits with 3
+if COLMAP sees no CUDA device. The venv goes to `$GAUSIFY_COLMAP_VENV`, else
+`ComfyUI/models/gausify/colmap-venv`; pass a directory as the first argument to
+choose another (then export `GAUSIFY_COLMAP_VENV` for ComfyUI too). `PYTHON=...`
+selects the interpreter instead of the active venv. Use ComfyUI's Python: the venv
+is stamped with its version and rebuilt if it differs. Don't create it with a plain
 `python -m venv` + `pip install`; without the stamp the node replaces it.
-
-Check that COLMAP sees the GPU:
-
-```bash
-/path/to/ComfyUI/models/gausify/colmap-venv/bin/python -c "
-import sys; sys.path.insert(0, '.')
-from gausify.cuda_libs import import_pycolmap
-p = import_pycolmap(); print('cuda build:', p.has_cuda, 'devices:', p.get_num_cuda_devices())"
-```
-
-Expect `cuda build: True devices: 1` (or more).
 
 ### Upgrading from a version that installed pycolmap into ComfyUI's venv
 
