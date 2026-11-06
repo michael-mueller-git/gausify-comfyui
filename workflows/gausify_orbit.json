@@ -110,7 +110,7 @@
       "outputs": [],
       "properties": {},
       "widgets_values": [
-        "Masks (optional): the Solid Colour mask node below is bypassed. Enable it (Ctrl+B) for a green/blue-screen video, or replace it with the RMBG-1.4 or SAM 2.1 mask node (or any node that outputs one MASK per frame, white = subject). With masks the splat is trained as a cut-out (RGBA), the pose check can run, and `use_mask_for_poses` restricts features to the subject."
+        "Masks: the Solid Colour mask node below keys out a green/blue-screen background. For other videos replace it with the RMBG-1.4 or SAM 2.1 mask node (or any node that outputs one MASK per frame, white = subject), or bypass it (Ctrl+B) to train on full frames. With masks the splat is trained as a cut-out (RGBA), the pose check can run, and `use_mask_for_poses` restricts features to the subject."
       ]
     },
     {
@@ -126,7 +126,7 @@
       ],
       "flags": {},
       "order": 3,
-      "mode": 4,
+      "mode": 0,
       "inputs": [
         {
           "name": "images",
