@@ -41,7 +41,7 @@ masking methods of gausify-orbit); connect their `masks` to the Poses node.
 | Method | How | License | Download |
 |---|---|---|---|
 | Solid Colour | Chroma key: distance to the background colour (median of the frame borders, or `color`), tolerance, softness, flood fill from the borders (`contiguous` keeps holes in the subject) | none (no model) | none |
-| RMBG-1.4 | BRIA AI background removal, one frame at a time | **non-commercial** (BRIA RMBG-1.4); set `accept_noncommercial_license` | 176 MB |
+| RMBG-1.4 | BRIA AI background removal, one frame at a time | **non-commercial** (BRIA RMBG-1.4); set `accept_noncommercial_license` (or `GAUSIFY_ACCEPT_RMBG_LICENSE=1` for the whole instance) | 176 MB |
 | SAM 2.1 | Meta's SAM 2.1 tiny video tracking: mark the subject on `prompt_frame` with `box` (`x0,y0,x1,y1`) and/or `points` (`x,y,label;...`, label 1 = subject, 0 = background), all normalized 0-1; with neither, the object at the centre is tracked. Propagated forward, then backward; consistent across frames | Apache-2.0 | fp32 165 MB, fp16 84 MB |
 
 Models are downloaded on first use (sha256-checked) into `$GAUSIFY_MODEL_DIR`,
@@ -74,7 +74,7 @@ it loads custom nodes from `<base-directory>/custom_nodes`, not
 `ComfyUI/custom_nodes`; clone there instead.
 
 Keep a folder name other than `gausify` (that name is the library package
-inside). Dependencies: numpy, scipy, opencv-python-headless (>= 4.12), pillow and
+inside). Dependencies: numpy, scipy, opencv-python-headless (>= 4.12, < 5: OpenCV 5 drops `cv2.AKAZE_create`), pillow and
 onnxruntime-gpu. `brush-cli` is downloaded on first use into
 `ComfyUI/models/gausify/bin` (override with `GAUSIFY_BIN_DIR`).
 

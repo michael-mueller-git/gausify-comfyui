@@ -71,6 +71,11 @@ def extract(
     if scale < 1:
         gray = cv2.resize(gray, (_js_round(W * scale), _js_round(H * scale)), interpolation=cv2.INTER_AREA)
 
+    if not hasattr(cv2, "AKAZE_create"):
+        raise RuntimeError(
+            f"OpenCV {cv2.__version__} has no AKAZE_create (OpenCV 5 dropped it). Install OpenCV 4: "
+            'pip install "opencv-python-headless>=4.12,<5"'
+        )
     akaze = cv2.AKAZE_create()
     kps, desc = (), None
     for thr in THRESHOLDS:

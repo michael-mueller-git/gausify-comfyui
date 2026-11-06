@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 
 import numpy as np
@@ -17,8 +18,15 @@ log = logging.getLogger("gausify.nodes")
 RMBG_LICENSE_ERROR = (
     "RMBG-1.4 (BRIA AI) is licensed for non-commercial use only. Enable "
     "'accept_noncommercial_license' to confirm you accept the BRIA RMBG-1.4 non-commercial license "
-    "(https://huggingface.co/briaai/RMBG-1.4), or use the Solid Colour or SAM 2.1 mask nodes."
+    "(https://huggingface.co/briaai/RMBG-1.4) (or set GAUSIFY_ACCEPT_RMBG_LICENSE=1 for the whole "
+    "ComfyUI instance), or use the Solid Colour or SAM 2.1 mask nodes."
 )
+
+
+def rmbg_license_accepted_by_env() -> bool:
+    """GAUSIFY_ACCEPT_RMBG_LICENSE=1/true/yes: the operator accepts the RMBG-1.4 license instance-wide."""
+    return os.environ.get("GAUSIFY_ACCEPT_RMBG_LICENSE", "").strip().lower() in ("1", "true", "yes")
+
 
 _HEX = re.compile(r"^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
@@ -166,12 +174,13 @@ class GausifyMaskRMBG(_MaskBase):
         return {"required": {
             "images": ("IMAGE",),
             "accept_noncommercial_license": ("BOOLEAN", {"default": False,
-                                             "tooltip": "RMBG-1.4 is licensed by BRIA AI for non-commercial use only."}),
+                                             "tooltip": "RMBG-1.4 is licensed by BRIA AI for non-commercial use only. "
+                                                        "GAUSIFY_ACCEPT_RMBG_LICENSE=1 accepts it for the whole instance."}),
             "device": (["auto", "cuda", "cpu"], {"default": "auto"}),
         }}
 
     def mask(self, images, accept_noncommercial_license, device):
-        if not accept_noncommercial_license:
+        if not (accept_noncommercial_license or rmbg_license_accepted_by_env()):
             raise ValueError(RMBG_LICENSE_ERROR)
         from gausify.masking.rmbg import rmbg_masks
 
