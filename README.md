@@ -69,6 +69,10 @@ git clone https://github.com/michael-mueller-git/gausify-comfyui
 pip install -r gausify-comfyui/requirements.txt
 ```
 
+If ComfyUI runs with `--base-directory` (e.g. Docker images using `/basedir`),
+it loads custom nodes from `<base-directory>/custom_nodes`, not
+`ComfyUI/custom_nodes`; clone there instead.
+
 Keep a folder name other than `gausify` (that name is the library package
 inside). Dependencies: numpy, scipy, opencv-python-headless (>= 4.12), pillow and
 onnxruntime-gpu. `brush-cli` is downloaded on first use into
