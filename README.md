@@ -63,6 +63,7 @@ installed it, `pip uninstall onnxruntime` first, then reinstall `onnxruntime-gpu
 Manual install:
 
 ```bash
+source /path/to/ComfyUI/venv/bin/activate  # ComfyUI's Python env, e.g. /comfy/mnt/venv
 cd ComfyUI/custom_nodes
 git clone https://github.com/michael-mueller-git/gausify-comfyui
 pip install -r gausify-comfyui/requirements.txt
