@@ -1,5 +1,6 @@
 """ComfyUI nodes of Gausify Orbit."""
 
+from .clean import GausifyCleanSplat
 from .frame_select import GausifyFrameSelect
 from .masks import GausifyMaskChroma, GausifyMaskRMBG, GausifyMaskSAM2
 from .poses import GausifyPoses
@@ -13,6 +14,7 @@ NODE_CLASS_MAPPINGS = {
     "GausifyOrbitPoses": GausifyPoses,
     "GausifyOrbitTrainSplat": GausifyTrainSplat,
     "GausifyOrbitTrainAdvanced": GausifyTrainAdvanced,
+    "GausifyOrbitCleanSplat": GausifyCleanSplat,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -23,6 +25,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "GausifyOrbitPoses": "Gausify Orbit Poses",
     "GausifyOrbitTrainSplat": "Gausify Orbit Train Splat",
     "GausifyOrbitTrainAdvanced": "Gausify Orbit Train Advanced",
+    "GausifyOrbitCleanSplat": "Gausify Orbit Clean Splat",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

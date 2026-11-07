@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 import nodes  # noqa: E402
 from nodes import common  # noqa: E402
+from nodes.clean import GausifyCleanSplat  # noqa: E402
 from nodes.frame_select import GausifyFrameSelect  # noqa: E402
 from nodes.masks import GausifyMaskChroma, GausifyMaskRMBG, GausifyMaskSAM2  # noqa: E402
 from nodes.poses import GausifyPoses  # noqa: E402
@@ -63,14 +64,14 @@ def test_mappings():
             assert cls.RETURN_TYPES == ("MASK", "STRING") and cls.RETURN_NAMES == ("masks", "stats")
             assert it["required"]["images"] == ("IMAGE",)
             continue
-        if cls is GausifyTrainAdvanced:  # settings only, no preset
+        if cls in (GausifyTrainAdvanced, GausifyCleanSplat):  # no preset
             assert "preset" not in it["required"]
             continue
         assert it["required"]["preset"][0] == PRESET_NAMES
         assert it["required"]["preset"][1]["default"] == DEFAULT_PRESET
     assert len(MASK_NODES) == 3 and all(c in nodes.NODE_CLASS_MAPPINGS.values() for c in MASK_NODES)
     assert {c for c in nodes.NODE_CLASS_MAPPINGS.values() if c not in MASK_NODES} == {
-        GausifyFrameSelect, GausifyPoses, GausifyTrainSplat, GausifyTrainAdvanced}
+        GausifyFrameSelect, GausifyPoses, GausifyTrainSplat, GausifyTrainAdvanced, GausifyCleanSplat}
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskChroma"] == "Gausify Orbit Mask (Solid Colour)"
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskRMBG"] == "Gausify Orbit Mask (RMBG-1.4)"
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskSAM2"] == "Gausify Orbit Mask (SAM 2.1)"
@@ -416,13 +417,14 @@ def test_example_workflow_matches_nodes(workflow, mask_node):
     links = {link[0]: link for link in wf["links"]}
     assert {"GausifyOrbitFrameSelect", "GausifyOrbitPoses", "GausifyOrbitTrainSplat", mask_node} <= set(by_type)
     for name, cls in nodes.NODE_CLASS_MAPPINGS.items():
-        if name not in by_type:  # alternative mask nodes; Train Advanced is optional
-            assert cls in MASK_NODES or cls is GausifyTrainAdvanced, name
+        if name not in by_type:  # alternative mask nodes; Train Advanced and Clean Splat are optional
+            assert cls in MASK_NODES or cls in (GausifyTrainAdvanced, GausifyCleanSplat), name
             continue
         n = by_type[name]
         it = cls.INPUT_TYPES()
         widgets = [k for sect in ("required", "optional") for k, v in it.get(sect, {}).items()
-                   if isinstance(v[0], list) or v[0] in ("INT", "FLOAT", "STRING", "BOOLEAN")]
+                   if (isinstance(v[0], list) or v[0] in ("INT", "FLOAT", "STRING", "BOOLEAN"))
+              and not (len(v) > 1 and v[1].get("forceInput"))]
         extra = sum(1 for k in widgets if k == "seed")  # control_after_generate
         assert len(n["widgets_values"]) == len(widgets) + extra, name
         assert [o["type"] for o in n["outputs"]] == list(cls.RETURN_TYPES)
@@ -442,7 +444,8 @@ def test_person_workflow_settings():
         cls = nodes.NODE_CLASS_MAPPINGS[name]
         it = cls.INPUT_TYPES()
         ws = [k for sect in ("required", "optional") for k, v in it.get(sect, {}).items()
-              if isinstance(v[0], list) or v[0] in ("INT", "FLOAT", "STRING", "BOOLEAN")]
+              if (isinstance(v[0], list) or v[0] in ("INT", "FLOAT", "STRING", "BOOLEAN"))
+              and not (len(v) > 1 and v[1].get("forceInput"))]
         vals = [v for v in by_type[name]["widgets_values"] if v not in ("fixed",)]
         return dict(zip(ws, vals))
 
@@ -453,6 +456,11 @@ def test_person_workflow_settings():
     assert t["final_frames"] == "all_frames"
     adv = GausifyTrainAdvanced().settings(**values("GausifyOrbitTrainAdvanced"))[0]
     assert adv == {"contrib-prune-min-views": 3}
+    c = values("GausifyOrbitCleanSplat")
+    assert c["hull_carve"] and c["check_psnr"]
+    links = {link[0]: link for link in wf["links"]}
+    clean_id = by_type["GausifyOrbitCleanSplat"]["id"]
+    assert links[by_type["Preview3D"]["inputs"][0]["link"]][1] == clean_id  # Preview3D shows the cleaned splat
 
 
 # ---------------------------------------------------------------- mask nodes

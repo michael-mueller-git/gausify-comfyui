@@ -20,6 +20,7 @@ sharp-frame selection, camera poses (AKAZE + incremental SfM, or COLMAP's SIFT
 | **Gausify Orbit Poses** | images, frame_times, masks (optional); preset, estimator (`akaze`/`colmap`), match_window, closed_loop, flat_orbit, fill_missing, use_mask_for_poses, pose_check (`off`/`auto`/`always`, needs masks), sfm_max_side + max_features (AKAZE limits, app: 1600 / 4000) | GAUSIFY_CAMERAS, colmap_path, stats (JSON) |
 | **Gausify Orbit Train Splat** | cameras; preset, steps, sh_degree, max_splats (millions), max_resolution, ssim, reduce_haze (masked only), psnr, despill + strength (masked only), seed, filename_prefix, psnr_holdout_every, final_frames (`holdout`/`all_frames`); advanced (optional) | ply_path (relative to the output folder), num_splats, psnr |
 | **Gausify Orbit Train Advanced** | Brush settings: growth, contribution pruning, regularisers (opacity, volume, flatten, normal consistency), learning-rate multipliers. Defaults are Brush's own, so connecting it unchanged does nothing | advanced → Train Splat |
+| **Gausify Orbit Clean Splat** | cameras, ply_path; hull_carve + hull_tolerance + mask_margin (masked only), drop_unseen, max_distance, min_opacity, max_size, check_psnr | ply_path (`<splat>_clean.ply`), num_splats, stats (JSON) |
 
 `preset` (`preview`, `balanced`, `quality`, `custom`) is the app's quality
 preset: anything but `custom` overrides the node's preset-controlled widgets
@@ -34,6 +35,23 @@ is held out to measure PSNR, so the saved splat never sees those frames.
 `final_frames = all_frames` then trains a second time on every frame and saves
 that splat (about twice the time; `psnr` comes from the first run). With `psnr`
 off, every frame is used and training runs once.
+
+### Cleaning up the splat
+
+**Gausify Orbit Clean Splat** (not part of the app) goes between Train Splat and
+Preview3D. It removes Gaussians that can't belong to the subject, judged from
+the dataset's cameras, and saves `<splat>_clean.ply` next to the input:
+
+- `hull_carve` (masked datasets): it removes a splat whose centre falls outside the subject
+  mask (grown by `mask_margin` % of the image) in more than `hull_tolerance` of
+  the views that see it. This catches floaters, the ghost silhouette and leftover background.
+  A higher tolerance forgives masks that miss a hand or hair in a few frames.
+- `drop_unseen`: it removes splats that no camera sees.
+- `max_distance`, `min_opacity`, `max_size` (0 = off): these remove splats far from the
+  orbit centre (in orbit radii; e.g. 1.5 drops distant background without
+  masks), nearly transparent ones, and huge ones (largest axis in orbit radii, e.g. 0.1).
+- `check_psnr`: it renders 12 training views before and after and puts both PSNRs in
+  `stats`. A clear drop means the clean-up cut into the subject.
 
 ### Recommended settings for people
 
@@ -53,6 +71,7 @@ set up for a camera orbiting a person who stands still:
 - **Train Advanced**: contribution pruning (`contrib_prune_min_views 3`) removes
   ghosts and doubled edges caused by small movements of the person. Opacity
   regularisers stay at 0 because they harden hair.
+- **Clean Splat**: hull carving with its defaults; Preview3D shows the cleaned splat.
 
 Everything else in that workflow stays at the app's defaults.
 
