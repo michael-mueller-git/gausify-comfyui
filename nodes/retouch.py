@@ -153,6 +153,8 @@ class GausifyRetouchApply:
                 "seed": ("INT", {"default": 42, "min": 0, "max": 2**63 - 1}),
                 "drop_inconsistent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.5, "step": 0.01, "tooltip": (
                     "As on Train Splat: leave the pose check's outlier photos out (use the same value).")}),
+                "deflicker": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": (
+                    "As on Train Splat: even out exposure flicker of the photos (use the same value).")}),
             },
             "optional": {
                 "advanced": ("GAUSIFY_TRAIN_SETTINGS", {"tooltip": "From Gausify Orbit Train Advanced."}),
@@ -161,7 +163,7 @@ class GausifyRetouchApply:
 
     def apply(self, cameras: OrbitCameras, ply_path, clip, restored, steps, restored_ratio, max_splats,
               max_resolution, ssim, reduce_haze, despill, despill_strength, seed, drop_inconsistent=0.0,
-              advanced=None):
+              advanced=None, deflicker=0.0):
         from gausify import brush
         from gausify.retouch import build_retouch_dataset, sh_degree_of
         from gausify.train_config import to_cli_args, train_config
@@ -196,11 +198,15 @@ class GausifyRetouchApply:
                 progress.sub(0.0, 0.1), interrupted,
             )
             raise_if_interrupted()
+            if float(deflicker) > 0:
+                from .train import _deflicker
+
+                stats["deflicker"] = _deflicker(cameras, ds, float(deflicker))
             if float(drop_inconsistent) > 0:
                 from .train import _drop_inconsistent
 
-                stats["droppedPhotos"] = len(_drop_inconsistent(cameras, ds if masked else None,
-                                                                float(drop_inconsistent)))
+                # the retouch dataset is always a copy
+                stats["droppedPhotos"] = len(_drop_inconsistent(cameras, ds, float(drop_inconsistent)))
             cfg = dict(train_config(opts, masked))
             cfg.update(advanced or {})
             # The fine-tune's own settings win over the advanced ones (as the app).

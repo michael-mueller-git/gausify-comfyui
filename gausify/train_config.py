@@ -159,10 +159,25 @@ ADVANCED = {
 }
 
 
+#: Train Advanced "loss": the photometric loss. l1_ssim = Brush's (and the
+#: app's): L1 + SSIM (with the Train Splat ssim toggle). l1_ssim_lpips adds
+#: LPIPS (VGG, weights built into brush-cli) x lpips_weight: sharper hair,
+#: fabric and skin texture; slower steps and more GPU memory.
+LOSSES = ["l1_ssim", "l1_ssim_lpips"]
+DEFAULT_LPIPS_WEIGHT = 0.1
+
+
 def advanced_config(values: dict) -> dict:
     """Brush keys (kebab-case) for the advanced settings that differ from
     Brush's defaults; unknown names raise. An empty dict = Brush's defaults."""
     out: dict = {}
+    values = dict(values)
+    loss = values.pop("loss", LOSSES[0])
+    lpips_weight = float(values.pop("lpips_weight", DEFAULT_LPIPS_WEIGHT))
+    if loss not in LOSSES:
+        raise ValueError(f"unknown loss {loss!r} (expected one of {LOSSES})")
+    if loss == "l1_ssim_lpips" and lpips_weight > 0:
+        out["lpips-loss-weight"] = lpips_weight
     for name, v in values.items():
         if name not in ADVANCED:
             raise KeyError(f"unknown advanced setting {name!r}")

@@ -3,6 +3,7 @@
 # CUDA 13. It is installed on first use into its own venv (gausify/colmap_env.py).
 numpy
 onnxruntime-gpu>=1.20
+onnx
 scipy
 opencv-python-headless>=4.12,<5
 pillow

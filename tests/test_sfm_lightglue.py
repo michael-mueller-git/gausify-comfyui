@@ -162,3 +162,110 @@ def test_real_model_poses():
                     max_side=480, max_features=2048)
     assert model.stats["registered"] >= len(names) * 0.8
     assert float(model.stats["meanError"]) < 2.0
+
+
+class FakeExtractor:
+    """Split mode: image i -> GRID keypoints, normalised keypoints and
+    descriptors that encode the grid index (so the fake matcher can match)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def get_inputs(self):
+        return [_Input()]
+
+    def run(self, _out, feeds):
+        x = feeds["images"]
+        self.calls.append(x.shape[0])
+        b = x.shape[0]
+        kps = np.stack([GRID] * b)
+        desc = np.zeros((b, len(GRID), 4), np.float32)
+        desc[:, :, 0] = np.arange(len(GRID))
+        return kps, np.stack([GRID / 64.0] * b), desc
+
+
+class FakeMatcher:
+    def __init__(self):
+        self.calls = 0
+
+    def run(self, _out, feeds):
+        d = feeds[lg.DESC]
+        assert feeds[lg.NORM].shape[:2] == d.shape[:2] and d.shape[0] % 2 == 0
+        self.calls += 1
+        rows = [[p, j, int(d[2 * p + 1, j, 0])] for p in range(d.shape[0] // 2) for j in range(d.shape[1])]
+        scores = np.ones(len(rows), np.float32)
+        scores[::3] = 0.05  # below MIN_SCORE: dropped
+        return np.array(rows, np.int64), scores
+
+
+def test_lightglue_poses_split(monkeypatch, tmp_path):
+    images, names = _frames(tmp_path, 10)
+    seen = {}
+
+    def reconstruct(feats, matches, **kw):
+        from gausify.types import SfmModel
+
+        seen["feats"] = feats
+        return SfmModel(f=50.0, cx=64, cy=24, width=128, height=48, poses=[None] * 10, points=[], names=[],
+                        stats={"registered": 0, "points": 0, "meanError": 0.0})
+
+    monkeypatch.setattr(lg, "reconstruct", reconstruct)
+    ext, mat = FakeExtractor(), FakeMatcher()
+    pairs = orbit_pairs(10, 3, True)
+    _, matches = lg.lightglue_poses(images, names, None, pairs, max_side=64, split=(ext, mat), batch=4)
+    assert sum(ext.calls) == 10 and ext.calls == [8, 2]  # every frame extracted once
+    assert mat.calls == -(-len(pairs) // 4)
+    feats = seen["feats"]
+    np.testing.assert_allclose(feats[0].xy, GRID * (2.0, 1.5), rtol=1e-6)
+    for m in matches:
+        assert len(m["idx"]) == len(GRID) - 4  # 4 of 12 below the score threshold
+        np.testing.assert_allclose(feats[m["a"]].xy[m["idx"][:, 0]], feats[m["b"]].xy[m["idx"][:, 1]])
+
+
+def test_sessions_fall_back_to_pipeline(monkeypatch, tmp_path):
+    import gausify.downloader
+    import gausify.masking.onnx
+
+    model = tmp_path / "m.onnx"
+    model.write_bytes(b"x")
+    monkeypatch.setattr(gausify.downloader, "ensure_model", lambda name, progress=None: model)
+    monkeypatch.setattr(gausify.masking.onnx, "session", lambda p, device, label: (str(p), label))
+    monkeypatch.setattr(lg, "_SESSIONS", {})
+
+    def broken(path):
+        raise ImportError("No module named 'onnx'")
+
+    monkeypatch.setattr(lg, "split_model", broken)
+    warned = []
+    s = lg._sessions(4000, "auto", log=warned.append)
+    assert s["mode"] == "pipeline" and s["pipeline"][0] == str(model) and "pip install onnx" in warned[0]
+    with pytest.raises(ImportError):
+        lg._sessions(2048, "split")
+    monkeypatch.setattr(lg, "split_model", lambda p: (tmp_path / "e.onnx", tmp_path / "x.onnx"))
+    s = lg._sessions(2048, "auto")
+    assert s["mode"] == "split" and s["extractor"][0].endswith("e.onnx") and s["matcher"][0].endswith("x.onnx")
+    assert lg._sessions(2048, "auto") is s  # cached
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not os.environ.get("GAUSIFY_MODEL_ALIKED_LIGHTGLUE_K2048") or not E2E.is_dir(),
+                    reason="set GAUSIFY_MODEL_ALIKED_LIGHTGLUE_K2048 to the ONNX file (and have .dev/e2e/src)")
+def test_real_split_matches_pipeline(tmp_path):
+    import shutil
+
+    src = Path(os.environ["GAUSIFY_MODEL_ALIKED_LIGHTGLUE_K2048"])
+    model = tmp_path / src.name
+    shutil.copyfile(src, model)
+    ext_p, mat_p = lg.split_model(model)
+    from gausify.masking.onnx import session
+
+    names = sorted(p.name for p in E2E.glob("*.png"))[:6]
+    pairs = orbit_pairs(6, 2, False)
+    kw = dict(max_side=320, closed_loop=False)
+    ma, a = lg.lightglue_poses(E2E, names, None, pairs, split=(session(ext_p, "cpu"), session(mat_p, "cpu")), **kw)
+    mb, b = lg.lightglue_poses(E2E, names, None, pairs, session=session(model, "cpu"), **kw)
+
+    def matched(model, ms):  # keypoint order may differ (tied scores): compare positions
+        return [{tuple(np.round(np.r_[model.xy[m["a"]][i], model.xy[m["b"]][j]], 2)) for i, j in m["idx"]} for m in ms]
+
+    assert matched(ma, a) == matched(mb, b) and sum(len(x["idx"]) for x in a) > 100

@@ -9,9 +9,10 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from gausify.deflicker import WINDOW as DEFLICKER_WINDOW
 from gausify.posecheck.score import OUTLIER_RATIO
 from gausify.presets import DEFAULT_PRESET, PRESETS, REDUCE_HAZE_WEIGHT
-from gausify.train_config import ADVANCED, advanced_config
+from gausify.train_config import ADVANCED, DEFAULT_LPIPS_WEIGHT, LOSSES, advanced_config
 from gausify.types import OrbitCameras
 
 from .common import (
@@ -97,6 +98,11 @@ class GausifyTrainSplat:
                     "(scores of the Poses node's pose check, which needs masks and pose_check auto/always): "
                     "frames where the subject moved or the pose is off, which cause ghosting. Only outliers "
                     f"(score > {OUTLIER_RATIO:g}x the median) are dropped. 0 = off (the app).")}),
+                "deflicker": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": (
+                    "Even out exposure and white-balance flicker between frames (common in generated videos): "
+                    "each frame's colour balance (on the subject, with masks) is pulled toward the median of "
+                    f"its {DEFLICKER_WINDOW} neighbours, by this strength (1 = fully). Slow lighting changes "
+                    "around the orbit stay. Only the training copy is changed. 0 = off (the app).")}),
             },
             "optional": {
                 "advanced": ("GAUSIFY_TRAIN_SETTINGS", {
@@ -106,7 +112,7 @@ class GausifyTrainSplat:
 
     def train(self, cameras: OrbitCameras, preset, steps, sh_degree, max_splats, max_resolution, ssim,
               reduce_haze, psnr, despill, despill_strength, seed, filename_prefix, psnr_holdout_every=16,
-              final_frames="holdout", drop_inconsistent=0.0, advanced=None):
+              final_frames="holdout", drop_inconsistent=0.0, advanced=None, deflicker=0.0):
         from gausify import brush
         from gausify.train_config import to_cli_args, train_config
 
@@ -134,9 +140,18 @@ class GausifyTrainSplat:
                 log=lambda s: log.info("gausify alpha: %s", s), progress=progress.sub(0.0, 0.02), cancel=interrupted,
             ))
             raise_if_interrupted()
+        flicker = None
+        if float(deflicker) > 0:
+            if work is None:  # the source dataset: correct a copy
+                work = temp_dir() / "gausify" / f"deflicker-{content_hash(str(cameras.root), float(deflicker))}"
+                if work.exists():
+                    shutil.rmtree(work)
+                dataset = copy_dataset(cameras, work)
+            flicker = run_cancellable(_deflicker, cameras, dataset, float(deflicker), progress.sub(0.0, 0.02))
+            raise_if_interrupted()
         dropped = []
         if float(drop_inconsistent) > 0:
-            dropped = _drop_inconsistent(cameras, dataset if masked else None, float(drop_inconsistent))
+            dropped = _drop_inconsistent(cameras, dataset if work is not None else None, float(drop_inconsistent))
         cfg = dict(train_config(opts, masked))
         cfg.update(advanced or {})
         cfg["export-every"] = opts["export_every"]
@@ -180,8 +195,35 @@ class GausifyTrainSplat:
         text = f"{rel}: {splats} splats" + (f", PSNR {psnr_v:.2f} dB" if p is not None else "")
         if dropped:
             text += f", {len(dropped)} inconsistent frames left out"
+        if flicker:
+            text += f", deflicker {flicker['meanCorrection']:.1f}% (max {flicker['maxCorrection']:.1f}%)"
         return {"ui": {"text": [text]},
                 "result": (rel, splats, psnr_v)}
+
+
+def copy_dataset(cameras: OrbitCameras, out: Path) -> Path:
+    """images/ + sparse/0 of the poses' dataset, copied to `out` (to change
+    them without touching the source)."""
+    shutil.copytree(cameras.images_dir, out / "images")
+    sparse = out / "sparse" / "0"
+    sparse.mkdir(parents=True, exist_ok=True)
+    for f in Path(cameras.sparse_dir).iterdir():
+        if f.is_file():
+            shutil.copyfile(f, sparse / f.name)
+    return out
+
+
+def _deflicker(cameras: OrbitCameras, dataset: Path, strength: float, progress=None) -> dict:
+    """Deflickers the photos of a training copy (in orbit order: the poses'
+    frame names); other images (Retouch's restored frames) are left alone."""
+    from gausify.deflicker import deflicker_images
+
+    files = {p.stem: p for p in (Path(dataset) / "images").iterdir() if p.is_file()}
+    paths = [files[Path(n).stem] for n in cameras.names if Path(n).stem in files]
+    stats = deflicker_images(paths, strength, progress=progress, cancel=interrupted)
+    log.info("gausify train: deflicker on %d frames: mean %.2f%%, max %.2f%% correction",
+             stats["frames"], stats["meanCorrection"], stats["maxCorrection"])
+    return stats
 
 
 def _drop_inconsistent(cameras: OrbitCameras, dataset: Path | None, fraction: float) -> list[str]:
@@ -215,7 +257,7 @@ class GausifyTrainAdvanced:
     RETURN_NAMES = ("advanced",)
     FUNCTION = "settings"
     DESCRIPTION = ("Advanced Brush training settings for Gausify Orbit Train Splat (growth, pruning, "
-                   "regularisers, learning rates). The defaults are Brush's own: connected unchanged, it "
+                   "regularisers, learning rates, LPIPS loss). The defaults are Brush's own: connected unchanged, it "
                    "changes nothing.")
 
     @classmethod
@@ -226,6 +268,14 @@ class GausifyTrainAdvanced:
             if kind == "FLOAT":
                 o["round"] = False
             req[name] = (kind, o)
+        req["loss"] = (LOSSES, {"default": LOSSES[0], "tooltip": (
+            "l1_ssim: Brush's loss (L1, + SSIM when Train Splat's ssim is on), as the app. l1_ssim_lpips: adds "
+            "the LPIPS perceptual loss (VGG): sharper hair, fabric and skin texture, less blur; slower steps "
+            "and more GPU memory.")})
+        req["lpips_weight"] = ("FLOAT", {"default": DEFAULT_LPIPS_WEIGHT, "min": 0.0, "max": 1.0, "step": 0.01,
+                                         "round": False, "tooltip": (
+                                             "With loss l1_ssim_lpips: weight of the LPIPS term (0.05-0.2 "
+                                             "typical; higher can add high-frequency artefacts).")})
         return {"required": req}
 
     def settings(self, **values):

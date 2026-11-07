@@ -497,13 +497,60 @@ def test_train_drop_inconsistent(monkeypatch, comfy_dirs, tmp_path, caplog):
     assert len(seen["names"]) == 12 and len(list((root / "images").iterdir())) == 12
 
 
+def test_train_deflicker(monkeypatch, comfy_dirs, tmp_path):
+    import cv2
+
+    from gausify.colmap_io import write_model
+    from gausify.train_config import to_cli_args, train_config
+
+    names = [f"{i:05d}.png" for i in range(9)]
+    root = tmp_path / "ds"
+    model = SfmModel(f=10, cx=5, cy=4, width=10, height=8, names=names, points=[],
+                     poses=[Pose(R=np.eye(3), t=np.array([0.0, 0, i])) for i in range(9)])
+    write_model(model, root / "sparse" / "0", names)
+    (root / "images").mkdir()
+    rng = np.random.default_rng(1)
+    for i, n in enumerate(names):
+        im = rng.integers(60, 140, (8, 10, 3)).astype(np.float64) * (1.4 if i == 4 else 1.0)
+        cv2.imwrite(str(root / "images" / n), im.astype(np.uint8))
+    src = (root / "images" / "00004.png").read_bytes()
+    seen = {}
+
+    def train(dataset_dir, args, out_ply, init_ply=None, progress=None, cancel=None):
+        d = Path(dataset_dir)
+        seen["dataset"] = d
+        seen["means"] = [cv2.imread(str(d / "images" / n)).mean() for n in names]
+        seen["sparse"] = (d / "sparse" / "0" / "images.bin").is_file()
+        Path(out_ply).write_text("ply")
+        return {"splats": 1}
+
+    _fake_module(monkeypatch, "gausify.train_config", train_config=train_config, to_cli_args=to_cli_args)
+    _fake_module(monkeypatch, "gausify.brush", train=train)
+    cams = OrbitCameras(root=root, names=names, width=10, height=8, masked=False)
+    node = GausifyTrainSplat()
+    base = ("custom", 2000, 1, 1.0, 960, False, False, False, False, 100, 1, "t/x")
+    node.train(cams, *base)
+    assert seen["dataset"] == root  # off: trains on the source, as before
+    r = node.train(cams, *base, deflicker=1.0)
+    m = seen["means"]
+    assert seen["dataset"] != root and seen["sparse"] and not seen["dataset"].exists()  # a temporary copy
+    assert abs(m[4] / np.median(m) - 1) < 0.05 and "deflicker" in r["ui"]["text"][0]
+    assert (root / "images" / "00004.png").read_bytes() == src  # the source is untouched
+
+
 def test_train_advanced_node():
     it = GausifyTrainAdvanced.INPUT_TYPES()["required"]
     d = _defaults(GausifyTrainAdvanced)
     assert GausifyTrainAdvanced().settings(**d) == ({},)  # Brush's defaults: nothing passed
     for k, (kind, o) in it.items():
-        assert o["min"] <= o["default"] <= o["max"], k
+        if k != "loss":
+            assert o["min"] <= o["default"] <= o["max"], k
     assert d["growth_stop_iter"] == 15000 and d["refine_every"] == 200
+    # LPIPS: selectable; the default (current) loss passes nothing
+    assert it["loss"][0] == ["l1_ssim", "l1_ssim_lpips"] and d["loss"] == "l1_ssim"
+    assert GausifyTrainAdvanced().settings(**{**d, "lpips_weight": 0.3}) == ({},)
+    assert GausifyTrainAdvanced().settings(**{**d, "loss": "l1_ssim_lpips"}) == ({"lpips-loss-weight": 0.1},)
+    assert GausifyTrainAdvanced().settings(**{**d, "loss": "l1_ssim_lpips", "lpips_weight": 0.0}) == ({},)
 
 
 @pytest.mark.parametrize("workflow, mask_node", [("gausify_orbit.json", "GausifyOrbitMaskChroma"),
