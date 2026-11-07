@@ -72,3 +72,19 @@ def test_cli_args():
     assert args[args.index("--opac-binary-weight") + 1] == "0.01"
     assert args[args.index("--ssim-weight") + 1] == "0"
     assert to_cli_args({"lr-mean": 1e-6, "x": None}) == ["--lr-mean", "1e-06"]
+
+
+def test_advanced_config():
+    from gausify.train_config import ADVANCED, advanced_config
+
+    assert advanced_config({k: v[1] for k, v in ADVANCED.items()}) == {}
+    cfg = advanced_config({"growth_stop_iter": 20000, "opac_binary_weight": 0.01, "lr_scale_mult": 2.0,
+                           "refine_every": 200})
+    assert cfg == {"growth-stop-iter": 20000, "opac-binary-weight": 0.01, "lr-scale": 0.01}
+    assert to_cli_args(cfg) == ["--growth-stop-iter", "20000", "--opac-binary-weight", "0.01", "--lr-scale", "0.01"]
+    try:
+        advanced_config({"bogus": 1})
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("unknown setting accepted")

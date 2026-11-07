@@ -25,7 +25,7 @@ from nodes import common  # noqa: E402
 from nodes.frame_select import GausifyFrameSelect  # noqa: E402
 from nodes.masks import GausifyMaskChroma, GausifyMaskRMBG, GausifyMaskSAM2  # noqa: E402
 from nodes.poses import GausifyPoses  # noqa: E402
-from nodes.train import GausifyTrainSplat, train_options  # noqa: E402
+from nodes.train import GausifyTrainAdvanced, GausifyTrainSplat, train_options  # noqa: E402
 
 MASK_NODES = (GausifyMaskChroma, GausifyMaskRMBG, GausifyMaskSAM2)
 
@@ -63,11 +63,14 @@ def test_mappings():
             assert cls.RETURN_TYPES == ("MASK", "STRING") and cls.RETURN_NAMES == ("masks", "stats")
             assert it["required"]["images"] == ("IMAGE",)
             continue
+        if cls is GausifyTrainAdvanced:  # settings only, no preset
+            assert "preset" not in it["required"]
+            continue
         assert it["required"]["preset"][0] == PRESET_NAMES
         assert it["required"]["preset"][1]["default"] == DEFAULT_PRESET
     assert len(MASK_NODES) == 3 and all(c in nodes.NODE_CLASS_MAPPINGS.values() for c in MASK_NODES)
     assert {c for c in nodes.NODE_CLASS_MAPPINGS.values() if c not in MASK_NODES} == {
-        GausifyFrameSelect, GausifyPoses, GausifyTrainSplat}
+        GausifyFrameSelect, GausifyPoses, GausifyTrainSplat, GausifyTrainAdvanced}
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskChroma"] == "Gausify Orbit Mask (Solid Colour)"
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskRMBG"] == "Gausify Orbit Mask (RMBG-1.4)"
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskSAM2"] == "Gausify Orbit Mask (SAM 2.1)"
@@ -226,9 +229,10 @@ def test_poses_wiring_and_cache(monkeypatch, comfy_dirs):
     calls = []
 
     def run_sfm(images_dir, names, masks_dir, estimator, window, closed_loop, flat_orbit, fill_missing, times,
-                progress=None, cancel=None, sparse_dir=None, log_fn=None):
+                progress=None, cancel=None, sparse_dir=None, log_fn=None, **limits):
         calls.append(dict(images_dir=Path(images_dir), names=names, masks_dir=masks_dir, estimator=estimator,
-                          window=window, closed=closed_loop, flat=flat_orbit, fill=fill_missing, times=times))
+                          window=window, closed=closed_loop, flat=flat_orbit, fill=fill_missing, times=times,
+                          limits=limits))
         assert all((Path(images_dir) / n).is_file() for n in names)
         Path(sparse_dir).mkdir(parents=True)
         (Path(sparse_dir) / "images.bin").write_bytes(b"x")
@@ -272,6 +276,15 @@ def test_poses_wiring_and_cache(monkeypatch, comfy_dirs):
     node.poses(imgs, "custom", "akaze", 6, False, False, False, True, "off",
                frame_times=OrbitTimes([0.0, 2.0, 3.0, 7.0, 9.0], from_images=True))
     assert len(calls) == 3 and calls[2]["times"] is None
+    assert all(c["limits"] == {} for c in calls)  # defaults: run_sfm's own (the app's)
+    # AKAZE limits: passed to run_sfm and part of the cache key
+    node.poses(imgs, "custom", "akaze", 6, False, False, False, True, "off", sfm_max_side=1920, max_features=8000)
+    assert len(calls) == 4 and calls[3]["limits"] == {"max_side": 1920, "max_features": 8000}
+    node.poses(imgs, "custom", "akaze", 6, False, False, False, True, "off", sfm_max_side=1920, max_features=8000)
+    assert len(calls) == 4
+    # COLMAP ignores them
+    node.poses(imgs, "custom", "colmap", 6, False, False, False, True, "off", sfm_max_side=1920, max_features=8000)
+    assert len(calls) == 5 and calls[4]["limits"] == {}
 
 
 def test_poses_too_few_registered(monkeypatch, comfy_dirs):
@@ -337,14 +350,74 @@ def test_train_wiring(monkeypatch, comfy_dirs, tmp_path):
     assert seen["opts"]["eval_split_every"] == 0 and seen["opts"]["max_splats"] == 500_000
 
 
-def test_example_workflow_matches_nodes():
-    wf = json.loads((ROOT / "workflows" / "gausify_orbit.json").read_text())
+def test_train_holdout_and_advanced(monkeypatch, comfy_dirs, tmp_path):
+    from gausify.train_config import to_cli_args, train_config
+
+    runs = []
+
+    def train(dataset_dir, args, out_ply, init_ply=None, progress=None, cancel=None):
+        runs.append({"args": list(args), "out": Path(out_ply), "dataset": Path(dataset_dir)})
+        Path(out_ply).write_text("ply")
+        evals = "--eval-split-every" in args
+        return {"psnr": 30.0 if evals else None, "splats": 100 * len(runs)}
+
+    _fake_module(monkeypatch, "gausify.train_config", train_config=train_config, to_cli_args=to_cli_args)
+    _fake_module(monkeypatch, "gausify.brush", train=train)
+    root = tmp_path / "ds"
+    (root / "sparse" / "0").mkdir(parents=True)
+    (root / "sparse" / "0" / "images.bin").write_bytes(b"x")
+    cams = OrbitCameras(root=root, names=["00000.png"], width=10, height=8, masked=False)
+    node = GausifyTrainSplat()
+    base = ("custom", 2000, 1, 1.0, 960, False, False, True, False, 100, 1, "t/x")
+
+    # holdout (default): one run, held-out every 8th frame
+    r = node.train(cams, *base, psnr_holdout_every=8)
+    assert len(runs) == 1 and r["result"][1:] == (100, 30.0)
+    a = runs[0]["args"]
+    assert a[a.index("--eval-split-every") + 1] == "8"
+
+    # all_frames: PSNR run, then a run on every frame saved as the output
+    runs.clear()
+    adv = GausifyTrainAdvanced().settings(**{**_defaults(GausifyTrainAdvanced), "contrib_prune_min_views": 3,
+                                             "lr_mean_mult": 0.5})[0]
+    r = node.train(cams, *base, final_frames="all_frames", advanced=adv)
+    rel, splats, psnr = r["result"]
+    assert len(runs) == 2 and (splats, psnr) == (200, 30.0)
+    assert "--eval-split-every" in runs[0]["args"] and "--eval-split-every" not in runs[1]["args"]
+    assert "--eval-every" not in runs[1]["args"]
+    assert runs[1]["out"] == comfy_dirs[0] / rel and not runs[0]["out"].exists()
+    assert root not in runs[0]["out"].parents  # never inside the dataset (Brush's init.ply lookup)
+    for run in runs:
+        a = run["args"]
+        assert a[a.index("--contrib-prune-min-views") + 1] == "3"
+        assert float(a[a.index("--lr-mean") + 1]) == pytest.approx(1e-5)
+        assert float(a[a.index("--lr-mean-end") + 1]) == pytest.approx(1e-7)
+
+    # all_frames without psnr: a single run on every frame
+    runs.clear()
+    node.train(cams, *base[:7], False, *base[8:], final_frames="all_frames")
+    assert len(runs) == 1 and "--eval-split-every" not in runs[0]["args"]
+
+
+def test_train_advanced_node():
+    it = GausifyTrainAdvanced.INPUT_TYPES()["required"]
+    d = _defaults(GausifyTrainAdvanced)
+    assert GausifyTrainAdvanced().settings(**d) == ({},)  # Brush's defaults: nothing passed
+    for k, (kind, o) in it.items():
+        assert o["min"] <= o["default"] <= o["max"], k
+    assert d["growth_stop_iter"] == 15000 and d["refine_every"] == 200
+
+
+@pytest.mark.parametrize("workflow, mask_node", [("gausify_orbit.json", "GausifyOrbitMaskChroma"),
+                                                 ("gausify_orbit_person.json", "GausifyOrbitMaskSAM2")])
+def test_example_workflow_matches_nodes(workflow, mask_node):
+    wf = json.loads((ROOT / "workflows" / workflow).read_text())
     by_type = {n["type"]: n for n in wf["nodes"]}
     links = {link[0]: link for link in wf["links"]}
-    assert {"GausifyOrbitFrameSelect", "GausifyOrbitPoses", "GausifyOrbitTrainSplat", "GausifyOrbitMaskChroma"} <= set(by_type)
+    assert {"GausifyOrbitFrameSelect", "GausifyOrbitPoses", "GausifyOrbitTrainSplat", mask_node} <= set(by_type)
     for name, cls in nodes.NODE_CLASS_MAPPINGS.items():
-        if name not in by_type:  # the RMBG and SAM 2.1 mask nodes are alternatives to the Solid Colour one
-            assert cls in MASK_NODES, name
+        if name not in by_type:  # alternative mask nodes; Train Advanced is optional
+            assert cls in MASK_NODES or cls is GausifyTrainAdvanced, name
             continue
         n = by_type[name]
         it = cls.INPUT_TYPES()
@@ -356,7 +429,30 @@ def test_example_workflow_matches_nodes():
         for inp in n["inputs"]:
             if inp["link"] is not None:
                 assert links[inp["link"]][5] == inp["type"]
+        if cls is GausifyTrainAdvanced:
+            assert cls().settings(**dict(zip(widgets, n["widgets_values"])))[0]  # changes something
     assert by_type["Preview3D"]["inputs"][0]["link"] in links
+
+
+def test_person_workflow_settings():
+    wf = json.loads((ROOT / "workflows" / "gausify_orbit_person.json").read_text())
+    by_type = {n["type"]: n for n in wf["nodes"]}
+
+    def values(name):
+        cls = nodes.NODE_CLASS_MAPPINGS[name]
+        it = cls.INPUT_TYPES()
+        ws = [k for sect in ("required", "optional") for k, v in it.get(sect, {}).items()
+              if isinstance(v[0], list) or v[0] in ("INT", "FLOAT", "STRING", "BOOLEAN")]
+        vals = [v for v in by_type[name]["widgets_values"] if v not in ("fixed",)]
+        return dict(zip(ws, vals))
+
+    p = values("GausifyOrbitPoses")
+    assert p["use_mask_for_poses"] and p["pose_check"] == "auto" and p["max_features"] > 4000
+    t = values("GausifyOrbitTrainSplat")
+    assert t["preset"] == "custom" and t["reduce_haze"] and t["ssim"] and not t["despill"]
+    assert t["final_frames"] == "all_frames"
+    adv = GausifyTrainAdvanced().settings(**values("GausifyOrbitTrainAdvanced"))[0]
+    assert adv == {"contrib-prune-min-views": 3}
 
 
 # ---------------------------------------------------------------- mask nodes

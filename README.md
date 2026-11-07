@@ -17,8 +17,9 @@ sharp-frame selection, camera poses (AKAZE + incremental SfM, or COLMAP's SIFT
 | **Gausify Orbit Mask (Solid Colour)** | images; auto_color, color, tolerance, softness, contiguous | MASK, stats (JSON) |
 | **Gausify Orbit Mask (RMBG-1.4)** | images; accept_noncommercial_license, device | MASK, stats (JSON) |
 | **Gausify Orbit Mask (SAM 2.1)** | images; prompt_frame, box, points, variant (`fp32`/`fp16`), device | MASK, stats (JSON) |
-| **Gausify Orbit Poses** | images, frame_times, masks (optional); preset, estimator (`akaze`/`colmap`), match_window, closed_loop, flat_orbit, fill_missing, use_mask_for_poses, pose_check (`off`/`auto`/`always`, needs masks) | GAUSIFY_CAMERAS, colmap_path, stats (JSON) |
-| **Gausify Orbit Train Splat** | cameras; preset, steps, sh_degree, max_splats (millions), max_resolution, ssim, reduce_haze (masked only), psnr, despill + strength (masked only), seed, filename_prefix | ply_path (relative to the output folder), num_splats, psnr |
+| **Gausify Orbit Poses** | images, frame_times, masks (optional); preset, estimator (`akaze`/`colmap`), match_window, closed_loop, flat_orbit, fill_missing, use_mask_for_poses, pose_check (`off`/`auto`/`always`, needs masks), sfm_max_side + max_features (AKAZE limits, app: 1600 / 4000) | GAUSIFY_CAMERAS, colmap_path, stats (JSON) |
+| **Gausify Orbit Train Splat** | cameras; preset, steps, sh_degree, max_splats (millions), max_resolution, ssim, reduce_haze (masked only), psnr, despill + strength (masked only), seed, filename_prefix, psnr_holdout_every, final_frames (`holdout`/`all_frames`); advanced (optional) | ply_path (relative to the output folder), num_splats, psnr |
+| **Gausify Orbit Train Advanced** | Brush settings: growth, contribution pruning, regularisers (opacity, volume, flatten, normal consistency), learning-rate multipliers. Defaults are Brush's own, so connecting it unchanged does nothing | advanced → Train Splat |
 
 `preset` (`preview`, `balanced`, `quality`, `custom`) is the app's quality
 preset: anything but `custom` overrides the node's preset-controlled widgets
@@ -27,6 +28,33 @@ preset: anything but `custom` overrides the node's preset-controlled widgets
 
 Connect `ply_path` to the core **Preview3D** node to view the splat. An
 example workflow is in [`workflows/gausify_orbit.json`](workflows/gausify_orbit.json).
+
+Training frames: with `psnr` on, every `psnr_holdout_every`-th frame (app: 16)
+is held out to measure PSNR, so the saved splat never sees those frames.
+`final_frames = all_frames` then trains a second time on every frame and saves
+that splat (about twice the time; `psnr` comes from the first run). With `psnr`
+off, every frame is used and training runs once.
+
+### Recommended settings for people
+
+[`workflows/gausify_orbit_person.json`](workflows/gausify_orbit_person.json) is
+set up for a camera orbiting a person who stands still:
+
+- **Frames**: `quality` preset (220 frames, 1920 px).
+- **Masks**: SAM 2.1 (fp32) tracks the object in the centre of frame 0. If it picks the wrong object, set a `box`.
+- **Poses**: `use_mask_for_poses` is on, so the background can't pull the
+  cameras. Turn it off for a real orbit with a detailed static background around a
+  person with little texture. Also: `pose_check = auto`, `fill_missing`,
+  `sfm_max_side 1920` and `max_features 8000` (more matches on skin and plain
+  clothes).
+- **Train**: 30k steps, SH degree 2, 3M splats, 1920 px, SSIM, `reduce_haze`.
+  `psnr` is off, so every frame trains the splat (set `final_frames = all_frames`
+  if you turn it on).
+- **Train Advanced**: contribution pruning (`contrib_prune_min_views 3`) removes
+  ghosts and doubled edges caused by small movements of the person. Opacity
+  regularisers stay at 0 because they harden hair.
+
+Everything else in that workflow stays at the app's defaults.
 
 Masks: plug any node that produces one MASK per selected frame (white =
 subject) into the Poses node. With masks, training is done on RGBA cut-outs

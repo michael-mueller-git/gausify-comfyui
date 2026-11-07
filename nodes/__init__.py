@@ -3,7 +3,7 @@
 from .frame_select import GausifyFrameSelect
 from .masks import GausifyMaskChroma, GausifyMaskRMBG, GausifyMaskSAM2
 from .poses import GausifyPoses
-from .train import GausifyTrainSplat
+from .train import GausifyTrainAdvanced, GausifyTrainSplat
 
 NODE_CLASS_MAPPINGS = {
     "GausifyOrbitFrameSelect": GausifyFrameSelect,
@@ -12,6 +12,7 @@ NODE_CLASS_MAPPINGS = {
     "GausifyOrbitMaskSAM2": GausifyMaskSAM2,
     "GausifyOrbitPoses": GausifyPoses,
     "GausifyOrbitTrainSplat": GausifyTrainSplat,
+    "GausifyOrbitTrainAdvanced": GausifyTrainAdvanced,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -21,6 +22,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "GausifyOrbitMaskSAM2": "Gausify Orbit Mask (SAM 2.1)",
     "GausifyOrbitPoses": "Gausify Orbit Poses",
     "GausifyOrbitTrainSplat": "Gausify Orbit Train Splat",
+    "GausifyOrbitTrainAdvanced": "Gausify Orbit Train Advanced",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

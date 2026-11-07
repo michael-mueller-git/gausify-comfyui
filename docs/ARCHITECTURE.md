@@ -38,7 +38,7 @@ Rules for every module:
 | `gausify/orbit.py` | `flatten_orbit(model) -> float|None`, `fill_missing(model, matches, times) -> dict` | `web/src/sfm/orbit.ts` |
 | `gausify/frames.py` | `select_frames(frames: np.ndarray (N,H,W,3) float, fps: float|None, target_frames, max_side, oversample, trim_start, trim_end) -> (np.ndarray, OrbitTimes)`; `sharpness(gray)` | `web/src/pipeline/frames.ts` |
 | `gausify/alpha.py` | `erode(mask, r)`, `decontaminate(rgb_u8, mask_u8) -> rgb_u8`, `despill(...)`, `build_alpha_dataset(cams: OrbitCameras, out_dir, despill, despill_strength) -> Path` (RGBA PNGs straight alpha + sparse/0 with .png names) | `web/src/pipeline/{erode,decontam,chroma,masks}.ts`, `web/src/host/job.ts` |
-| `gausify/train_config.py` | `train_config(opts: dict, masked: bool) -> dict` (kebab-case Brush keys, identical to `trainConfig()`), `to_cli_args(cfg: dict) -> list[str]` | `web/src/pipeline/train-config.ts` |
+| `gausify/train_config.py` | `train_config(opts: dict, masked: bool) -> dict` (kebab-case Brush keys, identical to `trainConfig()`), `to_cli_args(cfg: dict) -> list[str]`; `ADVANCED` (Brush options beyond the app's, with Brush's defaults) and `advanced_config(values) -> dict` (only the changed ones; `lr_*_mult` scale Brush's learning rates) for the Train Advanced node | `web/src/pipeline/train-config.ts` |
 | `gausify/downloader.py` | `ensure_binary(name: str) -> Path` using `gausify/binaries.json` (sha256-verified, lock file, cache in `ComfyUI/models/gausify/bin` or `$GAUSIFY_BIN_DIR`) | — |
 | `gausify/masking/chroma.py` | `border_key(rgb)`, `key_distance(rgb, key)`, `chroma_mask(rgb, key, tolerance, softness, contiguous) -> u8 mask`, `DEFAULT_CHROMA` (despill stays in `alpha.py`) | `web/src/pipeline/chroma.ts` |
 | `gausify/masking/onnx.py` | `session(path, device="auto", label) -> (InferenceSession, backend label)` (CUDA, CPU fallback) | `web/src/pipeline/segment.ts`, `sam2.ts` (`openSessions`) |
@@ -54,7 +54,7 @@ Rules for every module:
 | `gausify/sfm_akaze/` | `akaze_poses(images_dir, names, masks_dir|None, pairs, max_side, max_features, progress, cancel) -> (SfmModel, matches)` | `web/src/sfm/{features.worker,matcher,geometry,linalg,reconstruct,ba}.ts` |
 | `gausify/sfm.py` | `run_sfm(images_dir, names, masks_dir, estimator, window, closed_loop, flat_orbit, fill_missing, times) -> SfmModel` (pairs -> estimator -> flatten/fill -> stats) | `web/src/sfm/index.ts` (`runSfm`) |
 | `gausify/posecheck/` | `check_poses(cams: OrbitCameras, mode: "auto"|"always", progress, cancel) -> dict|None` | `web/src/posecheck/*`, docs/web.md "Pose check" |
-| `nodes/*.py` | ComfyUI nodes (Frame Select, Poses, Train Splat, Mask: Solid Colour / RMBG-1.4 / SAM 2.1 in `nodes/masks.py`, no preset) | `src/components/Sidebar.tsx` for options |
+| `nodes/*.py` | ComfyUI nodes (Frame Select, Poses, Train Splat, Train Advanced (no preset; beyond the app), Mask: Solid Colour / RMBG-1.4 / SAM 2.1 in `nodes/masks.py`, no preset). Options beyond the app (Poses `sfm_max_side`/`max_features`, Train `psnr_holdout_every`/`final_frames`/`advanced`) default to the app's behaviour | `src/components/Sidebar.tsx` for options |
 
 ## Binaries
 

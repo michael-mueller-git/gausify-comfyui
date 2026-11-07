@@ -91,3 +91,88 @@ def to_cli_args(cfg: dict) -> list[str]:
         else:
             out.append(_fmt(v))
     return out
+
+
+# ------------------------------------------------------------ advanced settings
+#
+# Brush options the app leaves at Brush's defaults, exposed by the "Train
+# Advanced" node. Defaults, ranges and meaning from brush-train/src/config.rs
+# at the pinned Brush commit (with gausify-orbit's patches: contribution
+# pruning, DeG regularisers, geometry schedule). Each entry:
+# name -> (kind, Brush default, min, max, step, tooltip). Learning rates are
+# exposed as multipliers of Brush's defaults ("lr_*_mult", key in LR_MULT).
+
+#: lr multiplier -> the Brush keys it scales (with their defaults).
+LR_MULT = {
+    "lr_mean_mult": {"lr-mean": 2e-5, "lr-mean-end": 2e-7},
+    "lr_coeffs_mult": {"lr-coeffs-dc": 2e-3},
+    "lr_opac_mult": {"lr-opac": 0.012},
+    "lr_scale_mult": {"lr-scale": 5e-3},
+    "lr_rotation_mult": {"lr-rotation": 2e-3},
+}
+
+ADVANCED = {
+    # growth / refinement
+    "refine_every": ("INT", 200, 1, 5000, 10,
+                     "Steps between refinements (splats grown, pruned, relocated). Roughly the number of "
+                     "images needed to cover the subject."),
+    "growth_grad_threshold": ("FLOAT", 0.0025, 0.0001, 0.05, 0.0001,
+                              "Splat growth threshold: lower grows more splats (finer detail, more memory)."),
+    "growth_select_fraction": ("FLOAT", 0.25, 0.01, 1.0, 0.01,
+                               "Fraction of the splats due to grow that actually grow."),
+    "growth_stop_iter": ("INT", 15000, 0, 100000, 500,
+                         "Step at which splat growth stops; the rest of training only refines."),
+    "split_at_screen_size": ("FLOAT", 0.5, 0.0, 1.0, 0.01,
+                             "Split splats larger than this fraction of the image (0 = off)."),
+    "opac_decay": ("FLOAT", 0.004, 0.0, 0.1, 0.001, "Opacity decay factor."),
+    "min_scale_factor": ("FLOAT", 0.1, 0.0, 2.0, 0.01,
+                         "Mip-Splatting 3D filter strength (anti-aliasing when zooming out; 0 = off)."),
+    "match_alpha_weight": ("FLOAT", 0.1, 0.0, 10.0, 0.01,
+                           "L1 weight on the alpha of masked (cut-out) frames: higher = sharper silhouette."),
+    "mean_noise_weight": ("FLOAT", 50.0, 0.0, 500.0, 1.0,
+                          "Noise added to the positions of low-opacity splats."),
+    # contribution pruning
+    "contrib_prune_min_views": ("INT", 0, 0, 100, 1,
+                                "Prune splats that hurt the loss (ghosts, doubled edges) once they were seen in "
+                                "at least this many views (0 = off)."),
+    "contrib_prune_ratio": ("FLOAT", 0.2, 0.0, 1.0, 0.01,
+                            "How clearly harmful a splat must be to be pruned (0 = any net loss)."),
+    "contrib_prune_start": ("FLOAT", 0.2, 0.0, 1.0, 0.01,
+                            "Fraction of training before contribution pruning starts."),
+    # regularisers
+    "opac_solid_weight": ("FLOAT", 0.0, 0.0, 1.0, 0.001,
+                          "Push splats towards opaque (less fog; can harm hair and other thin, soft detail)."),
+    "opac_binary_weight": ("FLOAT", 0.0, 0.0, 1.0, 0.001, "Push opacities to 0 or 1."),
+    "volume_reg_weight": ("FLOAT", 0.0, 0.0, 1.0, 0.001,
+                          "Keep splats compact (fewer blobs smeared across unseen angles)."),
+    "flatten_weight": ("FLOAT", 0.0, 0.0, 1.0, 0.001, "Flatten splats into disks (surfaces)."),
+    "normal_consistency_weight": ("FLOAT", 0.0, 0.0, 1.0, 0.001,
+                                  "2DGS normal consistency (one extra render per step). Meant for masked training."),
+    "geom_reg_end": ("FLOAT", 1.0, 0.0, 1.0, 0.01,
+                     "Fraction of training after which depth distortion / normal consistency stop."),
+    # learning rates (multipliers of Brush's defaults)
+    "lr_mean_mult": ("FLOAT", 1.0, 0.01, 10.0, 0.01, "Position learning rate (start and end) x this."),
+    "lr_coeffs_mult": ("FLOAT", 1.0, 0.01, 10.0, 0.01, "Colour learning rate x this."),
+    "lr_opac_mult": ("FLOAT", 1.0, 0.01, 10.0, 0.01, "Opacity learning rate x this."),
+    "lr_scale_mult": ("FLOAT", 1.0, 0.01, 10.0, 0.01, "Scale learning rate x this."),
+    "lr_rotation_mult": ("FLOAT", 1.0, 0.01, 10.0, 0.01, "Rotation learning rate x this."),
+}
+
+
+def advanced_config(values: dict) -> dict:
+    """Brush keys (kebab-case) for the advanced settings that differ from
+    Brush's defaults; unknown names raise. An empty dict = Brush's defaults."""
+    out: dict = {}
+    for name, v in values.items():
+        if name not in ADVANCED:
+            raise KeyError(f"unknown advanced setting {name!r}")
+        kind, default = ADVANCED[name][:2]
+        v = int(v) if kind == "INT" else float(v)
+        if abs(v - default) <= 1e-12 * max(1.0, abs(default)):
+            continue
+        if name in LR_MULT:
+            for key, base in LR_MULT[name].items():
+                out[key] = base * v
+        else:
+            out[name.replace("_", "-")] = v
+    return out

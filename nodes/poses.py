@@ -8,7 +8,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from gausify.presets import DEFAULT_PRESET, PRESETS
+from gausify.presets import DEFAULT_PRESET, PRESETS, SFM_MAX_FEATURES, SFM_MAX_SIDE
 from gausify.types import OrbitCameras, OrbitTimes
 
 from .common import (
@@ -85,6 +85,13 @@ class GausifyPoses:
                                                    "tooltip": "Features only on the subject (needs masks)."}),
                 "pose_check": (["off", "auto", "always"], {"default": "off",
                                "tooltip": "Consistency check (and correction) of the poses against the masks."}),
+                "sfm_max_side": ("INT", {"default": SFM_MAX_SIDE, "min": 320, "max": 4096, "step": 32,
+                                         "tooltip": "akaze: features are detected on the frames scaled to fit this "
+                                                    "size (no upscaling). The app: 1600."}),
+                "max_features": ("INT", {"default": SFM_MAX_FEATURES, "min": 500, "max": 32000, "step": 500,
+                                         "tooltip": "akaze: the strongest features kept per frame. More helps "
+                                                    "low-texture subjects (skin, plain clothes); slower matching. "
+                                                    "The app: 4000."}),
             },
             "optional": {
                 "frame_times": ("ORBIT_TIMES",),
@@ -93,7 +100,8 @@ class GausifyPoses:
         }
 
     def poses(self, images, preset, estimator, match_window, closed_loop, flat_orbit, fill_missing,
-              use_mask_for_poses, pose_check, frame_times=None, masks=None):
+              use_mask_for_poses, pose_check, sfm_max_side=SFM_MAX_SIDE, max_features=SFM_MAX_FEATURES,
+              frame_times=None, masks=None):
         from gausify.sfm import model_stats, run_sfm
 
         v = apply_preset("poses", preset, {"match_window": match_window, "closed_loop": closed_loop})
@@ -111,6 +119,9 @@ class GausifyPoses:
             if isinstance(frame_times, OrbitTimes) and not frame_times.from_images
             else None,
         }
+        if estimator == "akaze" and (int(sfm_max_side), int(max_features)) != (SFM_MAX_SIDE, SFM_MAX_FEATURES):
+            # Only when changed: the default cache keys stay those of earlier versions.
+            opts["akaze"] = {"max_side": int(sfm_max_side), "max_features": int(max_features)}
         root, names, w, h, masked = prepare_dataset(images, masks)
         if len(names) < 3:
             raise ValueError("Too few images (at least 3).")
@@ -152,6 +163,8 @@ class GausifyPoses:
             cancel=interrupted,
             sparse_dir=sparse,
             log_fn=say,
+            **({"max_side": opts["akaze"]["max_side"], "max_features": opts["akaze"]["max_features"]}
+               if "akaze" in opts else {}),
         )
         raise_if_interrupted()
         stats = model_stats(model)
