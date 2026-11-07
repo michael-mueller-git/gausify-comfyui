@@ -21,6 +21,7 @@ sharp-frame selection, camera poses (AKAZE + incremental SfM, or COLMAP's SIFT
 | **Gausify Orbit Train Splat** | cameras; preset, steps, sh_degree, max_splats (millions), max_resolution, ssim, reduce_haze (masked only), psnr, despill + strength (masked only), seed, filename_prefix, psnr_holdout_every, final_frames (`holdout`/`all_frames`); advanced (optional) | ply_path (relative to the output folder), num_splats, psnr |
 | **Gausify Orbit Train Advanced** | Brush settings: growth, contribution pruning, regularisers (opacity, volume, flatten, normal consistency), learning-rate multipliers. Defaults are Brush's own, so connecting it unchanged does nothing | advanced → Train Splat |
 | **Gausify Orbit Clean Splat** | cameras, ply_path; hull_carve + hull_tolerance + mask_margin (masked only), drop_unseen, max_distance, min_opacity, max_size, check_psnr | ply_path (`<splat>_clean.ply`), num_splats, stats (JSON) |
+| **Gausify Orbit SAM2 Points** | images; points (normalized `x,y,label;...`) | coordinates_positive, coordinates_negative (pixel JSON for kijai's SAM2 nodes) |
 
 `preset` (`preview`, `balanced`, `quality`, `custom`) is the app's quality
 preset: anything but `custom` overrides the node's preset-controlled widgets
@@ -118,7 +119,12 @@ selected frames. With these packs, you get better edges than the built-in nodes
 
 Suggested chains for people:
 
-1. Frame Select → SAM 2.1 large (segment-anything-2) → MaskEdgeUltraDetail V2 (VITMatte) → Poses `masks`
+1. Frame Select → SAM 2.1 large (segment-anything-2) → MaskEdgeUltraDetail V2 (VITMatte) → Poses `masks`.
+   Ready-made: [`workflows/gausify_orbit_person_sam2_vitmatte.json`](workflows/gausify_orbit_person_sam2_vitmatte.json)
+   (the person workflow with these masks). **Gausify Orbit SAM2 Points** converts normalized points
+   (`x,y,label;...`, default chest and hips at the centre) into the pixel coordinates kijai's
+   `Sam2VideoSegmentationAddPoints` expects, so no point editor is needed. Connect its
+   `coordinates_negative` only when you add background points (label 0).
 2. Frame Select → BiRefNet-HR or BiRefNet matting (ComfyUI-RMBG) → Poses `masks`. Simplest, but frame by frame: check it picks the person in every frame.
 
 Soft mattes become the alpha of the training frames, so hair keeps its

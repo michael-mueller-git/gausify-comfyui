@@ -24,7 +24,7 @@ import nodes  # noqa: E402
 from nodes import common  # noqa: E402
 from nodes.clean import GausifyCleanSplat  # noqa: E402
 from nodes.frame_select import GausifyFrameSelect  # noqa: E402
-from nodes.masks import GausifyMaskChroma, GausifyMaskRMBG, GausifyMaskSAM2  # noqa: E402
+from nodes.masks import GausifyMaskChroma, GausifyMaskRMBG, GausifyMaskSAM2, GausifySam2Points  # noqa: E402
 from nodes.poses import GausifyPoses  # noqa: E402
 from nodes.train import GausifyTrainAdvanced, GausifyTrainSplat, train_options  # noqa: E402
 
@@ -64,14 +64,15 @@ def test_mappings():
             assert cls.RETURN_TYPES == ("MASK", "STRING") and cls.RETURN_NAMES == ("masks", "stats")
             assert it["required"]["images"] == ("IMAGE",)
             continue
-        if cls in (GausifyTrainAdvanced, GausifyCleanSplat):  # no preset
+        if cls in (GausifyTrainAdvanced, GausifyCleanSplat, GausifySam2Points):  # no preset
             assert "preset" not in it["required"]
             continue
         assert it["required"]["preset"][0] == PRESET_NAMES
         assert it["required"]["preset"][1]["default"] == DEFAULT_PRESET
     assert len(MASK_NODES) == 3 and all(c in nodes.NODE_CLASS_MAPPINGS.values() for c in MASK_NODES)
     assert {c for c in nodes.NODE_CLASS_MAPPINGS.values() if c not in MASK_NODES} == {
-        GausifyFrameSelect, GausifyPoses, GausifyTrainSplat, GausifyTrainAdvanced, GausifyCleanSplat}
+        GausifyFrameSelect, GausifyPoses, GausifyTrainSplat, GausifyTrainAdvanced, GausifyCleanSplat,
+        GausifySam2Points}
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskChroma"] == "Gausify Orbit Mask (Solid Colour)"
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskRMBG"] == "Gausify Orbit Mask (RMBG-1.4)"
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskSAM2"] == "Gausify Orbit Mask (SAM 2.1)"
@@ -410,15 +411,16 @@ def test_train_advanced_node():
 
 
 @pytest.mark.parametrize("workflow, mask_node", [("gausify_orbit.json", "GausifyOrbitMaskChroma"),
-                                                 ("gausify_orbit_person.json", "GausifyOrbitMaskSAM2")])
+                                                 ("gausify_orbit_person.json", "GausifyOrbitMaskSAM2"),
+                                                 ("gausify_orbit_person_sam2_vitmatte.json", "GausifyOrbitSam2Points")])
 def test_example_workflow_matches_nodes(workflow, mask_node):
     wf = json.loads((ROOT / "workflows" / workflow).read_text())
     by_type = {n["type"]: n for n in wf["nodes"]}
     links = {link[0]: link for link in wf["links"]}
     assert {"GausifyOrbitFrameSelect", "GausifyOrbitPoses", "GausifyOrbitTrainSplat", mask_node} <= set(by_type)
     for name, cls in nodes.NODE_CLASS_MAPPINGS.items():
-        if name not in by_type:  # alternative mask nodes; Train Advanced and Clean Splat are optional
-            assert cls in MASK_NODES or cls in (GausifyTrainAdvanced, GausifyCleanSplat), name
+        if name not in by_type:  # alternative mask nodes; Train Advanced, Clean Splat, SAM2 Points are optional
+            assert cls in MASK_NODES or cls in (GausifyTrainAdvanced, GausifyCleanSplat, GausifySam2Points), name
             continue
         n = by_type[name]
         it = cls.INPUT_TYPES()
@@ -434,6 +436,58 @@ def test_example_workflow_matches_nodes(workflow, mask_node):
         if cls is GausifyTrainAdvanced:
             assert cls().settings(**dict(zip(widgets, n["widgets_values"])))[0]  # changes something
     assert by_type["Preview3D"]["inputs"][0]["link"] in links
+    # nodes of other packs: widget counts as in their INPUT_TYPES (pinned when the workflow was written)
+    for typ, n_widgets in THIRD_PARTY_WIDGETS.items():
+        if typ in by_type:
+            assert len(by_type[typ]["widgets_values"]) == n_widgets, typ
+    known = set(nodes.NODE_CLASS_MAPPINGS) | set(THIRD_PARTY_WIDGETS) | {"LoadVideo", "Note", "Preview3D"}
+    assert set(by_type) <= known, set(by_type) - known
+    for n in wf["nodes"]:  # every connected input is fed by an output of the same type
+        for inp in n.get("inputs", []):
+            if inp["link"] is not None:
+                lk = links[inp["link"]]
+                assert lk[3] == n["id"] and lk[5] == inp["type"]
+
+
+#: kijai/ComfyUI-segment-anything-2 and chflame163/ComfyUI_LayerStyle (nodes.py,
+#: py/mask_edge_ultra_detail_v2.py): widgets of the nodes the SAM2 + ViTMatte workflow uses.
+THIRD_PARTY_WIDGETS = {
+    "DownloadAndLoadSAM2Model": 4,  # model, segmentor, device, precision
+    "Sam2VideoSegmentationAddPoints": 2,  # frame_index, object_index
+    "Sam2VideoSegmentation": 1,  # keep_model_loaded
+    "LayerMask: MaskEdgeUltraDetail V2": 10,
+}
+
+
+def test_sam2_vitmatte_workflow():
+    wf = json.loads((ROOT / "workflows" / "gausify_orbit_person_sam2_vitmatte.json").read_text())
+    by_type = {n["type"]: n for n in wf["nodes"]}
+    links = {link[0]: link for link in wf["links"]}
+    load = by_type["DownloadAndLoadSAM2Model"]["widgets_values"]
+    assert load[:2] == ["sam2.1_hiera_large.safetensors", "video"]
+    vit = by_type["LayerMask: MaskEdgeUltraDetail V2"]
+    assert vit["widgets_values"][0] == "VITMatte"
+    poses_masks = next(i for i in by_type["GausifyOrbitPoses"]["inputs"] if i["name"] == "masks")
+    src = links[poses_masks["link"]]
+    assert src[1] == vit["id"] and src[2] == 1  # the refined mask, not the RGBA image
+    # same training settings as the person workflow
+    person = {n["type"]: n for n in json.loads((ROOT / "workflows" / "gausify_orbit_person.json").read_text())["nodes"]}
+    for t in ("GausifyOrbitFrameSelect", "GausifyOrbitPoses", "GausifyOrbitTrainSplat",
+              "GausifyOrbitTrainAdvanced", "GausifyOrbitCleanSplat"):
+        assert by_type[t]["widgets_values"] == person[t]["widgets_values"], t
+
+
+def test_sam2_points_node():
+    node = GausifySam2Points()
+    pos, neg = node.points(torch.zeros(3, 101, 201, 3), "0.5,0.5,1;0,1,1;1,0,0")
+    assert json.loads(pos) == [{"x": 100.0, "y": 50.0}, {"x": 0.0, "y": 100.0}]
+    assert json.loads(neg) == [{"x": 200.0, "y": 0.0}]
+    pos, neg = node.points(torch.zeros(1, 11, 21, 3), GausifySam2Points.INPUT_TYPES()["required"]["points"][1]["default"])
+    assert len(json.loads(pos)) == 2 and neg == ""
+    with pytest.raises(ValueError, match="subject point"):
+        node.points(torch.zeros(1, 4, 4, 3), "0.5,0.5,0")
+    with pytest.raises(ValueError):
+        node.points(torch.zeros(1, 4, 4, 3), "1.5,0.5,1")
 
 
 def test_person_workflow_settings():

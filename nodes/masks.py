@@ -223,3 +223,39 @@ class GausifyMaskSAM2(_MaskBase):
         )
         raise_if_interrupted()
         return _result(masks, stats)
+
+
+class GausifySam2Points:
+    """Normalized points -> the pixel coordinates (JSON) of kijai's
+    ComfyUI-segment-anything-2 nodes (`coordinates_positive` /
+    `coordinates_negative`), for the images' size."""
+
+    CATEGORY = CATEGORY
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("coordinates_positive", "coordinates_negative")
+    FUNCTION = "points"
+    DESCRIPTION = ("Points for kijai's SAM2 nodes (ComfyUI-segment-anything-2) in pixels of the images, from "
+                   "normalized 'x,y,label;...' (label 1 = subject, 0 = background). Connect "
+                   "coordinates_negative only when there are label-0 points.")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "images": ("IMAGE",),
+            "points": ("STRING", {"default": "0.5,0.35,1;0.5,0.6,1", "tooltip": (
+                "'x,y,label;...' normalized 0-1 on the frame SAM2 is prompted on; label 1 = subject, "
+                "0 = background. Default: two points down the centre (chest and hips of a centred person).")}),
+        }}
+
+    def points(self, images, points):
+        shape = tuple(images.shape)
+        h, w = (shape[1], shape[2]) if len(shape) == 4 else (shape[0], shape[1])
+        pts = parse_points(points)
+        if not any(p["label"] == 1 for p in pts):
+            raise ValueError("points: at least one subject point (label 1) is needed")
+
+        def coords(label):
+            return json.dumps([{"x": round(p["x"] * (w - 1), 1), "y": round(p["y"] * (h - 1), 1)}
+                               for p in pts if p["label"] == label])
+
+        return (coords(1), coords(0) if any(p["label"] == 0 for p in pts) else "")

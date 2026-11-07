@@ -1,0 +1,785 @@
+{
+  "id": "5b0c1d6e-6a5e-4c55-9a36-0b6f1a2c9e01",
+  "revision": 0,
+  "last_node_id": 14,
+  "last_link_id": 19,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadVideo",
+      "pos": [
+        40,
+        120
+      ],
+      "size": [
+        300,
+        420
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "links": [
+            1
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadVideo"
+      },
+      "widgets_values": [
+        "orbit.mp4",
+        "image"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "GausifyOrbitFrameSelect",
+      "pos": [
+        380,
+        120
+      ],
+      "size": [
+        320,
+        260
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": 1
+        },
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            2,
+            11,
+            12,
+            13
+          ]
+        },
+        {
+          "name": "frame_times",
+          "type": "ORBIT_TIMES",
+          "links": [
+            3
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GausifyOrbitFrameSelect"
+      },
+      "widgets_values": [
+        "quality",
+        220,
+        1920,
+        4,
+        0.0,
+        -1.0,
+        0.0
+      ]
+    },
+    {
+      "id": 3,
+      "type": "Note",
+      "pos": [
+        380,
+        420
+      ],
+      "size": [
+        380,
+        420
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "Person workflow with SAM 2.1 large + ViTMatte. Needs two extra node packs (ComfyUI Manager): kijai/ComfyUI-segment-anything-2 and chflame163/ComfyUI_LayerStyle. The SAM 2.1 large and ViTMatte models are downloaded on first use.\n\nMasks: SAM2 Points turns the normalized points (default: chest and hips at the frame centre) into pixel coordinates for SAM2 on frame 0; SAM 2.1 large tracks the person through the selected frames. If it picks the wrong thing, move the points; for background points (label 0) also connect coordinates_negative. MaskEdgeUltraDetail V2 (VITMatte) then turns the hard SAM mask into a soft matte (hair, fingers): edge_erode/edte_dilate set the band it re-mattes around the SAM edge; raise edte_dilate for loose hair. max_megapixels 2.5 keeps 1920x1080 frames at full size. keep_model_loaded is off so SAM2 frees the GPU before training.\n\nEverything after the masks is the same as gausify_orbit_person.json: use_mask_for_poses, pose_check auto, more AKAZE features, 30k steps with SH 2, SSIM, reduce_haze, contribution pruning and Clean Splat."
+      ]
+    },
+    {
+      "id": 4,
+      "type": "GausifyOrbitPoses",
+      "pos": [
+        740,
+        120
+      ],
+      "size": [
+        320,
+        300
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 2
+        },
+        {
+          "name": "frame_times",
+          "type": "ORBIT_TIMES",
+          "link": 3
+        },
+        {
+          "name": "masks",
+          "type": "MASK",
+          "link": 19
+        }
+      ],
+      "outputs": [
+        {
+          "name": "cameras",
+          "type": "GAUSIFY_CAMERAS",
+          "links": [
+            4,
+            10
+          ]
+        },
+        {
+          "name": "colmap_path",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "stats",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GausifyOrbitPoses"
+      },
+      "widgets_values": [
+        "custom",
+        "akaze",
+        20,
+        true,
+        false,
+        true,
+        true,
+        "auto",
+        1920,
+        8000
+      ]
+    },
+    {
+      "id": 5,
+      "type": "GausifyOrbitTrainSplat",
+      "pos": [
+        1100,
+        120
+      ],
+      "size": [
+        320,
+        420
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "cameras",
+          "type": "GAUSIFY_CAMERAS",
+          "link": 4
+        },
+        {
+          "name": "advanced",
+          "type": "GAUSIFY_TRAIN_SETTINGS",
+          "link": 8
+        }
+      ],
+      "outputs": [
+        {
+          "name": "ply_path",
+          "type": "STRING",
+          "links": [
+            9
+          ]
+        },
+        {
+          "name": "num_splats",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "psnr",
+          "type": "FLOAT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GausifyOrbitTrainSplat"
+      },
+      "widgets_values": [
+        "custom",
+        30000,
+        2,
+        3.0,
+        1920,
+        true,
+        true,
+        false,
+        false,
+        100,
+        42,
+        "fixed",
+        "gausify/person",
+        16,
+        "all_frames"
+      ]
+    },
+    {
+      "id": 6,
+      "type": "Preview3D",
+      "pos": [
+        1820,
+        120
+      ],
+      "size": [
+        420,
+        480
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model_file",
+          "type": "STRING",
+          "widget": {
+            "name": "model_file"
+          },
+          "link": 5
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "Preview3D"
+      },
+      "widgets_values": [
+        ""
+      ]
+    },
+    {
+      "id": 8,
+      "type": "GausifyOrbitTrainAdvanced",
+      "pos": [
+        740,
+        480
+      ],
+      "size": [
+        320,
+        640
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "advanced",
+          "type": "GAUSIFY_TRAIN_SETTINGS",
+          "links": [
+            8
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GausifyOrbitTrainAdvanced"
+      },
+      "widgets_values": [
+        200,
+        0.0025,
+        0.25,
+        15000,
+        0.5,
+        0.004,
+        0.1,
+        0.1,
+        50.0,
+        3,
+        0.2,
+        0.2,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "id": 9,
+      "type": "GausifyOrbitCleanSplat",
+      "pos": [
+        1460,
+        120
+      ],
+      "size": [
+        320,
+        330
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "cameras",
+          "type": "GAUSIFY_CAMERAS",
+          "link": 10
+        },
+        {
+          "name": "ply_path",
+          "type": "STRING",
+          "link": 9
+        }
+      ],
+      "outputs": [
+        {
+          "name": "ply_path",
+          "type": "STRING",
+          "links": [
+            5
+          ]
+        },
+        {
+          "name": "num_splats",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "stats",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GausifyOrbitCleanSplat"
+      },
+      "widgets_values": [
+        true,
+        0.25,
+        1.0,
+        true,
+        0.0,
+        0.0,
+        0.0,
+        true
+      ]
+    },
+    {
+      "id": 10,
+      "type": "GausifyOrbitSam2Points",
+      "pos": [
+        380,
+        560
+      ],
+      "size": [
+        320,
+        110
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 11
+        }
+      ],
+      "outputs": [
+        {
+          "name": "coordinates_positive",
+          "type": "STRING",
+          "links": [
+            14
+          ]
+        },
+        {
+          "name": "coordinates_negative",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GausifyOrbitSam2Points"
+      },
+      "widgets_values": [
+        "0.5,0.35,1;0.5,0.6,1"
+      ]
+    },
+    {
+      "id": 11,
+      "type": "DownloadAndLoadSAM2Model",
+      "pos": [
+        380,
+        700
+      ],
+      "size": [
+        320,
+        130
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "sam2_model",
+          "type": "SAM2MODEL",
+          "links": [
+            15
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "DownloadAndLoadSAM2Model"
+      },
+      "widgets_values": [
+        "sam2.1_hiera_large.safetensors",
+        "video",
+        "cuda",
+        "fp16"
+      ]
+    },
+    {
+      "id": 12,
+      "type": "Sam2VideoSegmentationAddPoints",
+      "pos": [
+        380,
+        860
+      ],
+      "size": [
+        320,
+        150
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "sam2_model",
+          "type": "SAM2MODEL",
+          "link": 15
+        },
+        {
+          "name": "coordinates_positive",
+          "type": "STRING",
+          "link": 14
+        },
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 12
+        },
+        {
+          "name": "coordinates_negative",
+          "type": "STRING",
+          "link": null
+        },
+        {
+          "name": "prev_inference_state",
+          "type": "SAM2INFERENCESTATE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "sam2_model",
+          "type": "SAM2MODEL",
+          "links": [
+            16
+          ]
+        },
+        {
+          "name": "inference_state",
+          "type": "SAM2INFERENCESTATE",
+          "links": [
+            17
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Sam2VideoSegmentationAddPoints"
+      },
+      "widgets_values": [
+        0,
+        0
+      ]
+    },
+    {
+      "id": 13,
+      "type": "Sam2VideoSegmentation",
+      "pos": [
+        380,
+        1040
+      ],
+      "size": [
+        320,
+        80
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "sam2_model",
+          "type": "SAM2MODEL",
+          "link": 16
+        },
+        {
+          "name": "inference_state",
+          "type": "SAM2INFERENCESTATE",
+          "link": 17
+        }
+      ],
+      "outputs": [
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": [
+            18
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Sam2VideoSegmentation"
+      },
+      "widgets_values": [
+        false
+      ]
+    },
+    {
+      "id": 14,
+      "type": "LayerMask: MaskEdgeUltraDetail V2",
+      "pos": [
+        380,
+        1150
+      ],
+      "size": [
+        320,
+        330
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 13
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 18
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": null
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": [
+            19
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LayerMask: MaskEdgeUltraDetail V2"
+      },
+      "widgets_values": [
+        "VITMatte",
+        0,
+        0,
+        0.75,
+        6,
+        10,
+        0.01,
+        0.99,
+        "cuda",
+        2.5
+      ]
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "VIDEO"
+    ],
+    [
+      2,
+      2,
+      0,
+      4,
+      0,
+      "IMAGE"
+    ],
+    [
+      3,
+      2,
+      1,
+      4,
+      1,
+      "ORBIT_TIMES"
+    ],
+    [
+      4,
+      4,
+      0,
+      5,
+      0,
+      "GAUSIFY_CAMERAS"
+    ],
+    [
+      5,
+      9,
+      0,
+      6,
+      0,
+      "STRING"
+    ],
+    [
+      8,
+      8,
+      0,
+      5,
+      1,
+      "GAUSIFY_TRAIN_SETTINGS"
+    ],
+    [
+      9,
+      5,
+      0,
+      9,
+      1,
+      "STRING"
+    ],
+    [
+      10,
+      4,
+      0,
+      9,
+      0,
+      "GAUSIFY_CAMERAS"
+    ],
+    [
+      11,
+      2,
+      0,
+      10,
+      0,
+      "IMAGE"
+    ],
+    [
+      12,
+      2,
+      0,
+      12,
+      2,
+      "IMAGE"
+    ],
+    [
+      13,
+      2,
+      0,
+      14,
+      0,
+      "IMAGE"
+    ],
+    [
+      14,
+      10,
+      0,
+      12,
+      1,
+      "STRING"
+    ],
+    [
+      15,
+      11,
+      0,
+      12,
+      0,
+      "SAM2MODEL"
+    ],
+    [
+      16,
+      12,
+      0,
+      13,
+      0,
+      "SAM2MODEL"
+    ],
+    [
+      17,
+      12,
+      1,
+      13,
+      1,
+      "SAM2INFERENCESTATE"
+    ],
+    [
+      18,
+      13,
+      0,
+      14,
+      1,
+      "MASK"
+    ],
+    [
+      19,
+      14,
+      1,
+      4,
+      2,
+      "MASK"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.8,
+      "offset": [
+        0,
+        0
+      ]
+    }
+  },
+  "version": 0.4
+}
