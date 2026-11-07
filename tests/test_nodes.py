@@ -437,6 +437,59 @@ def test_train_holdout_and_advanced(monkeypatch, comfy_dirs, tmp_path):
     assert len(runs) == 1 and "--eval-split-every" not in runs[0]["args"]
 
 
+def test_train_drop_inconsistent(monkeypatch, comfy_dirs, tmp_path, caplog):
+    from gausify.colmap_io import write_model
+    from gausify.posecheck.job import read_views
+    from gausify.train_config import to_cli_args, train_config
+
+    names = [f"{i:05d}.png" for i in range(12)]
+    root = tmp_path / "ds"
+    model = SfmModel(f=10, cx=5, cy=4, width=10, height=8, names=names, points=[],
+                     poses=[Pose(R=np.eye(3), t=np.array([0.0, 0, i])) for i in range(12)])
+    write_model(model, root / "sparse" / "0", names)
+    (root / "images").mkdir()
+    (root / "masks").mkdir()
+    import cv2
+
+    for n in names:
+        cv2.imwrite(str(root / "images" / n), np.full((8, 10, 3), 90, np.uint8))
+        cv2.imwrite(str(root / "masks" / n), np.full((8, 10), 255, np.uint8))
+    seen = {}
+
+    def train(dataset_dir, args, out_ply, init_ply=None, progress=None, cancel=None):
+        sp = Path(dataset_dir) / "sparse" / "0"
+        seen["names"] = [v.name for v in read_views((sp / "cameras.bin").read_bytes(), (sp / "images.bin").read_bytes())]
+        seen["files"] = sorted(p.name for p in (Path(dataset_dir) / "images").iterdir())
+        Path(out_ply).write_text("ply")
+        return {"splats": 1}
+
+    _fake_module(monkeypatch, "gausify.train_config", train_config=train_config, to_cli_args=to_cli_args)
+    _fake_module(monkeypatch, "gausify.brush", train=train)
+    values = [0.01] * 12
+    values[4], values[9] = 0.3, 0.08
+    cams = OrbitCameras(root=root, names=names, width=10, height=8, masked=True,
+                        stats={"check": {"frames": values, "names": names, "afterFrames": None}})
+    node = GausifyTrainSplat()
+    base = ("custom", 2000, 1, 1.0, 960, False, False, False, False, 100, 1, "t/x")
+    r = node.train(cams, *base, drop_inconsistent=0.25)
+    assert "00004.png" not in seen["names"] and "00009.png" not in seen["names"] and len(seen["names"]) == 10
+    assert seen["files"] == seen["names"] and "2 inconsistent frames" in r["ui"]["text"][0]
+    assert len(list((root / "images").iterdir())) == 12  # the source dataset is untouched
+    # corrected poses: their scores win
+    cams.stats["check"]["afterFrames"] = [0.01] * 11 + [0.5]
+    node.train(cams, *base, drop_inconsistent=0.25)
+    assert "00011.png" not in seen["names"] and "00004.png" in seen["names"]
+    # no pose check: nothing dropped, a warning
+    cams.stats = {}
+    with caplog.at_level("WARNING", logger="gausify.nodes"):
+        node.train(cams, *base, drop_inconsistent=0.25)
+    assert len(seen["names"]) == 12 and "pose check" in caplog.text
+    # unmasked: the dataset is the source folder itself, never touched
+    cams.masked, cams.stats = False, {"check": {"frames": values, "names": names}}
+    node.train(cams, *base, drop_inconsistent=0.25)
+    assert len(seen["names"]) == 12 and len(list((root / "images").iterdir())) == 12
+
+
 def test_train_advanced_node():
     it = GausifyTrainAdvanced.INPUT_TYPES()["required"]
     d = _defaults(GausifyTrainAdvanced)
@@ -555,7 +608,7 @@ def test_person_workflow_settings():
     assert p["use_mask_for_poses"] and p["pose_check"] == "auto" and p["max_features"] > 4000
     t = values("GausifyOrbitTrainSplat")
     assert t["preset"] == "custom" and t["reduce_haze"] and t["ssim"] and not t["despill"]
-    assert t["final_frames"] == "all_frames"
+    assert t["final_frames"] == "all_frames" and t["drop_inconsistent"] == 0.1
     adv = GausifyTrainAdvanced().settings(**values("GausifyOrbitTrainAdvanced"))[0]
     assert adv == {"contrib-prune-min-views": 3}
     c = values("GausifyOrbitCleanSplat")

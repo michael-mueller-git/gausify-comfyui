@@ -9,6 +9,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from gausify.posecheck.score import OUTLIER_RATIO
 from gausify.presets import DEFAULT_PRESET, PRESETS, REDUCE_HAZE_WEIGHT
 from gausify.train_config import ADVANCED, advanced_config
 from gausify.types import OrbitCameras
@@ -91,6 +92,11 @@ class GausifyTrainSplat:
                     "With psnr: holdout = the saved splat is the PSNR run, trained without the held-out frames "
                     "(as the app); all_frames = after the PSNR run, train again on every frame and save that "
                     "(about twice the time; psnr is from the first run). Without psnr every frame is used anyway.")}),
+                "drop_inconsistent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.5, "step": 0.01, "tooltip": (
+                    "Leave out of training up to this fraction of the frames that disagree most with the others "
+                    "(scores of the Poses node's pose check, which needs masks and pose_check auto/always): "
+                    "frames where the subject moved or the pose is off, which cause ghosting. Only outliers "
+                    f"(score > {OUTLIER_RATIO:g}x the median) are dropped. 0 = off (the app).")}),
             },
             "optional": {
                 "advanced": ("GAUSIFY_TRAIN_SETTINGS", {
@@ -100,7 +106,7 @@ class GausifyTrainSplat:
 
     def train(self, cameras: OrbitCameras, preset, steps, sh_degree, max_splats, max_resolution, ssim,
               reduce_haze, psnr, despill, despill_strength, seed, filename_prefix, psnr_holdout_every=16,
-              final_frames="holdout", advanced=None):
+              final_frames="holdout", drop_inconsistent=0.0, advanced=None):
         from gausify import brush
         from gausify.train_config import to_cli_args, train_config
 
@@ -128,6 +134,9 @@ class GausifyTrainSplat:
                 log=lambda s: log.info("gausify alpha: %s", s), progress=progress.sub(0.0, 0.02), cancel=interrupted,
             ))
             raise_if_interrupted()
+        dropped = []
+        if float(drop_inconsistent) > 0:
+            dropped = _drop_inconsistent(cameras, dataset if masked else None, float(drop_inconsistent))
         cfg = dict(train_config(opts, masked))
         cfg.update(advanced or {})
         cfg["export-every"] = opts["export_every"]
@@ -168,8 +177,33 @@ class GausifyTrainSplat:
         psnr_v = float(p) if p is not None and math.isfinite(float(p)) else 0.0
         splats = int(r.get("splats") or 0)
         progress(1.0, "done")
-        return {"ui": {"text": [f"{rel}: {splats} splats" + (f", PSNR {psnr_v:.2f} dB" if p is not None else "")]},
+        text = f"{rel}: {splats} splats" + (f", PSNR {psnr_v:.2f} dB" if p is not None else "")
+        if dropped:
+            text += f", {len(dropped)} inconsistent frames left out"
+        return {"ui": {"text": [text]},
                 "result": (rel, splats, psnr_v)}
+
+
+def _drop_inconsistent(cameras: OrbitCameras, dataset: Path | None, fraction: float) -> list[str]:
+    """Leaves the pose check's outlier frames out of the RGBA training dataset.
+    Returns the dropped names (none, with a log line, when there are no scores)."""
+    from gausify.posecheck.job import drop_images
+    from gausify.posecheck.score import inconsistent_frames
+
+    check = (cameras.stats or {}).get("check") or {}
+    values = check.get("afterFrames") or check.get("frames")
+    names = check.get("names")
+    if dataset is None or not values or not names:
+        log.warning("gausify train: drop_inconsistent needs masks and the Poses node's pose check "
+                    "(pose_check auto or always); no frames dropped")
+        return []
+    bad = inconsistent_frames(names, values, fraction)
+    if not bad:
+        log.info("gausify train: drop_inconsistent: no outlier frames")
+        return []
+    dropped = drop_images(dataset, bad)
+    log.info("gausify train: left out %d inconsistent frames: %s", len(dropped), ", ".join(dropped))
+    return dropped
 
 
 class GausifyTrainAdvanced:

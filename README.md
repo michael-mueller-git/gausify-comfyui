@@ -18,12 +18,12 @@ sharp-frame selection, camera poses (AKAZE + incremental SfM, or COLMAP's SIFT
 | **Gausify Orbit Mask (RMBG-1.4)** | images; accept_noncommercial_license, device | MASK, stats (JSON) |
 | **Gausify Orbit Mask (SAM 2.1)** | images; prompt_frame, box, points, variant (`fp32`/`fp16`), device | MASK, stats (JSON) |
 | **Gausify Orbit Poses** | images, frame_times, masks (optional); preset, estimator (`akaze`/`colmap`), match_window, closed_loop, flat_orbit, fill_missing, use_mask_for_poses, pose_check (`off`/`auto`/`always`, needs masks), sfm_max_side + max_features (AKAZE limits, app: 1600 / 4000) | GAUSIFY_CAMERAS, colmap_path, stats (JSON) |
-| **Gausify Orbit Train Splat** | cameras; preset, steps, sh_degree, max_splats (millions), max_resolution, ssim, reduce_haze (masked only), psnr, despill + strength (masked only), seed, filename_prefix, psnr_holdout_every, final_frames (`holdout`/`all_frames`); advanced (optional) | ply_path (relative to the output folder), num_splats, psnr |
+| **Gausify Orbit Train Splat** | cameras; preset, steps, sh_degree, max_splats (millions), max_resolution, ssim, reduce_haze (masked only), psnr, despill + strength (masked only), seed, filename_prefix, psnr_holdout_every, final_frames (`holdout`/`all_frames`), drop_inconsistent; advanced (optional) | ply_path (relative to the output folder), num_splats, psnr |
 | **Gausify Orbit Train Advanced** | Brush settings: growth, contribution pruning, regularisers (opacity, volume, flatten, normal consistency), learning-rate multipliers. Defaults are Brush's own, so connecting it unchanged does nothing | advanced → Train Splat |
 | **Gausify Orbit Clean Splat** | cameras, ply_path; hull_carve + hull_tolerance + mask_margin (masked only), drop_unseen, max_distance, min_opacity, max_size, check_psnr, hull_extent, auto_tolerance + max_psnr_drop | ply_path (`<splat>_clean.ply`), num_splats, stats (JSON) |
 | **Gausify Orbit SAM2 Points** | images; points (normalized `x,y,label;...`) | coordinates_positive, coordinates_negative (pixel JSON for kijai's SAM2 nodes) |
 | **Gausify Orbit Retouch Clip** | cameras, ply_path; motion (`wave`, `orbit_below`/`_above`, `arc_below`/`_above`), tilt, photo, seconds, fps, long_side | reference (IMAGE), alpha (MASK), clip, info |
-| **Gausify Orbit Retouch Apply** | cameras, ply_path, clip, restored (IMAGE); steps, restored_ratio, max_splats, max_resolution, ssim, reduce_haze, despill + strength, seed; advanced (optional) | ply_path (`<splat>_retouch.ply`), num_splats, stats (JSON) |
+| **Gausify Orbit Retouch Apply** | cameras, ply_path, clip, restored (IMAGE); steps, restored_ratio, max_splats, max_resolution, ssim, reduce_haze, despill + strength, seed, drop_inconsistent; advanced (optional) | ply_path (`<splat>_retouch.ply`), num_splats, stats (JSON) |
 
 `preset` (`preview`, `balanced`, `quality`, `custom`) is the app's quality
 preset: anything but `custom` overrides the node's preset-controlled widgets
@@ -38,6 +38,16 @@ is held out to measure PSNR, so the saved splat never sees those frames.
 `final_frames = all_frames` then trains a second time on every frame and saves
 that splat (about twice the time; `psnr` comes from the first run). With `psnr`
 off, every frame is used and training runs once.
+
+Inconsistent frames: `drop_inconsistent` (Train Splat and Retouch Apply, 0 =
+off) leaves out up to that fraction of the frames that disagree most with the
+rest, e.g. 0.1. Those are frames where the subject moved (common in generated
+videos) or the pose is off, and they cause ghosting. The scores come from the
+Poses node's pose check, so it needs masks and `pose_check` `auto` or `always`;
+corrected poses are scored again after correction. Only clear outliers (score
+above 1.5x the median) are dropped, and at least 8 frames are kept, so a clean
+orbit loses nothing. Without pose check scores it logs a warning and trains on
+every frame.
 
 Frame selection extras (off by default, as in the app): `skip_duplicates`
 drops picks that repeat the previous one (frozen or repeated frames of
@@ -110,7 +120,8 @@ set up for a camera orbiting a person who stands still:
   person with little texture. Also: `pose_check = auto`, `fill_missing`,
   `sfm_max_side 1920` and `max_features 8000` (more matches on skin and plain
   clothes).
-- **Train**: 30k steps, SH degree 2, 3M splats, 1920 px, SSIM, `reduce_haze`.
+- **Train**: 30k steps, SH degree 2, 3M splats, 1920 px, SSIM, `reduce_haze`,
+  `drop_inconsistent 0.1`.
   `psnr` is off, so every frame trains the splat (set `final_frames = all_frames`
   if you turn it on).
 - **Train Advanced**: contribution pruning (`contrib_prune_min_views 3`) removes

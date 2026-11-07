@@ -151,6 +151,8 @@ class GausifyRetouchApply:
                 "despill": ("BOOLEAN", {"default": False, "tooltip": "As on Train Splat (Solid Colour masks)."}),
                 "despill_strength": ("INT", {"default": 100, "min": 0, "max": 100}),
                 "seed": ("INT", {"default": 42, "min": 0, "max": 2**63 - 1}),
+                "drop_inconsistent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.5, "step": 0.01, "tooltip": (
+                    "As on Train Splat: leave the pose check's outlier photos out (use the same value).")}),
             },
             "optional": {
                 "advanced": ("GAUSIFY_TRAIN_SETTINGS", {"tooltip": "From Gausify Orbit Train Advanced."}),
@@ -158,7 +160,8 @@ class GausifyRetouchApply:
         }
 
     def apply(self, cameras: OrbitCameras, ply_path, clip, restored, steps, restored_ratio, max_splats,
-              max_resolution, ssim, reduce_haze, despill, despill_strength, seed, advanced=None):
+              max_resolution, ssim, reduce_haze, despill, despill_strength, seed, drop_inconsistent=0.0,
+              advanced=None):
         from gausify import brush
         from gausify.retouch import build_retouch_dataset, sh_degree_of
         from gausify.train_config import to_cli_args, train_config
@@ -193,6 +196,11 @@ class GausifyRetouchApply:
                 progress.sub(0.0, 0.1), interrupted,
             )
             raise_if_interrupted()
+            if float(drop_inconsistent) > 0:
+                from .train import _drop_inconsistent
+
+                stats["droppedPhotos"] = len(_drop_inconsistent(cameras, ds if masked else None,
+                                                                float(drop_inconsistent)))
             cfg = dict(train_config(opts, masked))
             cfg.update(advanced or {})
             # The fine-tune's own settings win over the advanced ones (as the app).

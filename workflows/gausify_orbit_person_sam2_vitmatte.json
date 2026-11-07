@@ -125,7 +125,7 @@
       "outputs": [],
       "properties": {},
       "widgets_values": [
-        "Person workflow with SAM 2.1 large + ViTMatte. Needs two extra node packs (ComfyUI Manager): kijai/ComfyUI-segment-anything-2 and chflame163/ComfyUI_LayerStyle. The SAM 2.1 large and ViTMatte models are downloaded on first use.\n\nMasks: SAM2 Points turns the normalized points (default: chest and hips at the frame centre) into pixel coordinates for SAM2 on frame 0; SAM 2.1 large tracks the person through every frame of the video (dense tracking works far better than on the sparse selected frames); Frame Select picks the masks of the frames it keeps, and VITMatte refines only those. Long or high-resolution videos need a lot of RAM/VRAM for SAM2: trim them or lower the resolution before tracking. If it picks the wrong thing, move the points; for background points (label 0) also connect coordinates_negative. MaskEdgeUltraDetail V2 (VITMatte) then turns the hard SAM mask into a soft matte (hair, fingers): edge_erode/edte_dilate set the band it re-mattes around the SAM edge; raise edte_dilate for loose hair. max_megapixels 2.5 keeps 1920x1080 frames at full size. keep_model_loaded is off so SAM2 frees the GPU before training.\n\nEverything after the masks is the same as gausify_orbit_person.json: use_mask_for_poses, pose_check auto, more AKAZE features, 30k steps with SH 2, SSIM, reduce_haze, contribution pruning and Clean Splat.\n\nFrame Select: skip_duplicates drops repeated frames of generated videos (fewer frames may come out)."
+        "Person workflow with SAM 2.1 large + ViTMatte. Needs two extra node packs (ComfyUI Manager): kijai/ComfyUI-segment-anything-2 and chflame163/ComfyUI_LayerStyle. The SAM 2.1 large and ViTMatte models are downloaded on first use.\n\nMasks: SAM2 Points turns the normalized points (default: chest and hips at the frame centre) into pixel coordinates for SAM2 on frame 0; SAM 2.1 large tracks the person through every frame of the video (dense tracking works far better than on the sparse selected frames); Frame Select picks the masks of the frames it keeps, and VITMatte refines only those. Long or high-resolution videos need a lot of RAM/VRAM for SAM2: trim them or lower the resolution before tracking. If it picks the wrong thing, move the points; for background points (label 0) also connect coordinates_negative. MaskEdgeUltraDetail V2 (VITMatte) then turns the hard SAM mask into a soft matte (hair, fingers): edge_erode/edte_dilate set the band it re-mattes around the SAM edge; raise edte_dilate for loose hair. max_megapixels 2.5 keeps 1920x1080 frames at full size. keep_model_loaded is off so SAM2 frees the GPU before training.\n\nEverything after the masks is the same as gausify_orbit_person.json: use_mask_for_poses, pose_check auto, more AKAZE features, 30k steps with SH 2, SSIM, reduce_haze, contribution pruning and Clean Splat.\n\nFrame Select: skip_duplicates drops repeated frames of generated videos (fewer frames may come out).\n\nTrain: drop_inconsistent 0.1 leaves out up to 10% of the frames the pose check finds inconsistent (the person moved, or the pose is off): only clear outliers, so a clean orbit loses nothing."
       ]
     },
     {
@@ -258,7 +258,8 @@
         "fixed",
         "gausify/person",
         16,
-        "all_frames"
+        "all_frames",
+        0.1
       ]
     },
     {

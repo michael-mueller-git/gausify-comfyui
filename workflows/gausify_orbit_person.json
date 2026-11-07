@@ -122,7 +122,7 @@
       "outputs": [],
       "properties": {},
       "widgets_values": [
-        "Recommended settings for a person (a camera orbiting someone who stands still, real or AI-generated).\n\nMask: SAM 2.1 tracks the object at the centre of frame 0, usually the person. If it picks the wrong thing, set a box on prompt_frame (e.g. 0.3,0.05,0.7,0.98) or points. With masks the splat is a cut-out.\n\nPoses: use_mask_for_poses keeps features on the person, so a background that does not move with the orbit (AI backgrounds, turntables) cannot pull the cameras. For a real orbit with a rich static background and little texture on the person, try turning it off. max_features 8000 / sfm_max_side 1920 find more matches on skin and plain clothes. pose_check auto corrects inconsistent poses, fill_missing adds frames SfM could not register.\n\nTrain: 30k steps, SH degree 2 (skin and fabric sheen), SSIM, reduce_haze (less fog around the silhouette). psnr is off so every frame trains the splat; turn it on with final_frames = all_frames to get a PSNR and still train on every frame (twice the time).\n\nTrain Advanced: contribution pruning (min views 3) removes ghosts and doubled edges, e.g. from small movements of the person. opac_solid_weight is left at 0: it hardens hair edges.\n\nClean Splat: removes splats outside the masks' visual hull (floaters, ghost silhouette) and saves <splat>_clean.ply, which Preview3D shows. Its stats report the training-view PSNR before and after; a clear drop means it cut into the person; auto_tolerance then retries with a looser hull_tolerance until the drop is at most 0.3 dB.\n\nFrame Select: skip_duplicates drops repeated frames of generated videos (fewer frames may come out)."
+        "Recommended settings for a person (a camera orbiting someone who stands still, real or AI-generated).\n\nMask: SAM 2.1 tracks the object at the centre of frame 0, usually the person. If it picks the wrong thing, set a box on prompt_frame (e.g. 0.3,0.05,0.7,0.98) or points. With masks the splat is a cut-out.\n\nPoses: use_mask_for_poses keeps features on the person, so a background that does not move with the orbit (AI backgrounds, turntables) cannot pull the cameras. For a real orbit with a rich static background and little texture on the person, try turning it off. max_features 8000 / sfm_max_side 1920 find more matches on skin and plain clothes. pose_check auto corrects inconsistent poses, fill_missing adds frames SfM could not register.\n\nTrain: 30k steps, SH degree 2 (skin and fabric sheen), SSIM, reduce_haze (less fog around the silhouette). psnr is off so every frame trains the splat; turn it on with final_frames = all_frames to get a PSNR and still train on every frame (twice the time).\n\nTrain Advanced: contribution pruning (min views 3) removes ghosts and doubled edges, e.g. from small movements of the person. opac_solid_weight is left at 0: it hardens hair edges.\n\nClean Splat: removes splats outside the masks' visual hull (floaters, ghost silhouette) and saves <splat>_clean.ply, which Preview3D shows. Its stats report the training-view PSNR before and after; a clear drop means it cut into the person; auto_tolerance then retries with a looser hull_tolerance until the drop is at most 0.3 dB.\n\nFrame Select: skip_duplicates drops repeated frames of generated videos (fewer frames may come out).\n\nTrain: drop_inconsistent 0.1 leaves out up to 10% of the frames the pose check finds inconsistent (the person moved, or the pose is off): only clear outliers, so a clean orbit loses nothing."
       ]
     },
     {
@@ -301,7 +301,8 @@
         "fixed",
         "gausify/person",
         16,
-        "all_frames"
+        "all_frames",
+        0.1
       ]
     },
     {

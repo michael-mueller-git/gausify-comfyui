@@ -356,7 +356,9 @@ def test_check_poses_corrects(tmp_path, fake_brush, monkeypatch):
     monkeypatch.setenv("GAUSIFY_POSECHECK", json.dumps({"rounds": 2}))
     seen = []
     stats = J.check_poses(cams, "always", progress=lambda f, m: seen.append(f))
-    assert set(stats) == {"score", "threshold", "frames", "flagged", "rounds", "after", "afterFrames", "seconds"}
+    assert set(stats) == {"score", "threshold", "frames", "names", "flagged", "rounds", "after", "afterFrames",
+                          "seconds"}
+    assert stats["names"] == sorted(cams.names) and len(stats["names"]) == len(stats["frames"])
     assert stats["threshold"] == 0.028 and stats["rounds"] == 2 and len(stats["frames"]) == 12
     # The perturbed frames stick out; after correction the orbit agrees better.
     assert max(stats["frames"][4:7]) > 0 and stats["after"] < stats["score"]
@@ -392,3 +394,37 @@ def test_check_poses_auto_not_flagged(tmp_path, fake_brush):
 def test_check_poses_skips_small_orbits(tmp_path, fake_brush):
     cams, truth, _ = make_dataset(tmp_path, n=6, bad=())
     assert J.check_poses(cams, "always") is None
+
+
+def test_inconsistent_frames():
+    from gausify.posecheck.score import inconsistent_frames
+
+    names = [f"{i:05d}.png" for i in range(20)]
+    vals = [0.01] * 20
+    assert inconsistent_frames(names, vals, 0.2) == []  # all alike: nothing is an outlier
+    vals[3], vals[7], vals[11] = 0.2, 0.05, 0.012
+    assert inconsistent_frames(names, vals, 0.2) == ["00003.png", "00007.png"]  # 0.012 < 1.5x median
+    assert inconsistent_frames(names, vals, 0.05) == ["00003.png"]  # budget: 1 frame
+    assert inconsistent_frames(names, vals, 0.0) == []
+    assert inconsistent_frames(names[:9], vals[:9], 0.5) == ["00003.png"]  # keeps at least 8
+    assert inconsistent_frames(names, vals[:5], 0.2) == []  # mismatched lengths: nothing
+
+
+def test_drop_images(tmp_path):
+    from gausify.colmap_io import write_model
+    from gausify.posecheck.job import drop_images, read_views
+    from gausify.types import Pose, SfmModel
+
+    names = [f"{i:05d}.png" for i in range(4)]
+    model = SfmModel(f=10, cx=5, cy=5, width=10, height=10, names=names, points=[],
+                     poses=[Pose(R=np.eye(3), t=np.array([0.0, 0, i])) for i in range(4)])
+    d = tmp_path / "ds"
+    write_model(model, d / "sparse" / "0", names)
+    (d / "images").mkdir()
+    for n in names:
+        (d / "images" / n).write_bytes(b"x")
+    assert drop_images(d, ["00001.jpg", "00003.png"]) == ["00001.png", "00003.png"]  # matched by stem
+    sp = d / "sparse" / "0"
+    assert [v.name for v in read_views((sp / "cameras.bin").read_bytes(), (sp / "images.bin").read_bytes())] == [
+        "00000.png", "00002.png"]
+    assert sorted(p.name for p in (d / "images").iterdir()) == ["00000.png", "00002.png"]

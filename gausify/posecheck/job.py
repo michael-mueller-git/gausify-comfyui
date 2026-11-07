@@ -183,6 +183,28 @@ def rewrite_images(images_bin: bytes, edit: Callable[[dict], dict | None]) -> by
     return struct.pack("<Q", count) + b"".join(parts)
 
 
+def drop_images(dataset_dir, names) -> list[str]:
+    """Removes images (matched by stem) from a dataset folder: their entries
+    in sparse/0/images.bin and their files in images/. Returns the dropped
+    names as they were in images.bin."""
+    d = Path(dataset_dir)
+    stems = {_stem(n) for n in names}
+    model = d / "sparse" / "0" / "images.bin"
+    dropped: list[str] = []
+
+    def edit(r):
+        if _stem(r["name"]) in stems:
+            dropped.append(r["name"])
+            return None
+        return r
+
+    model.write_bytes(rewrite_images(model.read_bytes(), edit))
+    for f in (d / "images").iterdir():
+        if _stem(f.name) in stems:
+            f.unlink()
+    return dropped
+
+
 def _stem(name: str) -> str:
     return name.rsplit(".", 1)[0] if "." in name else name
 
@@ -383,6 +405,8 @@ def check_poses(
             "score": score,
             "threshold": S.threshold,
             "frames": before,
+            # Beyond the app: the frame each value belongs to (drop_inconsistent).
+            "names": [v.name for v in views],
             "flagged": flagged,
             "rounds": 0,
             "after": None,

@@ -59,3 +59,22 @@ def opening_radius(max_side: int) -> int:
     """Opening radius at an analysis size (longer side): ~2 px of a 1280 px
     frame, at least 1 (JS Math.round: halves round up)."""
     return max(1, int(np.floor(max_side / 640 + 0.5)))
+
+
+#: inconsistent_frames: a frame is only dropped above this x the median value.
+OUTLIER_RATIO = 1.5
+
+
+def inconsistent_frames(names: Sequence[str], values: Sequence[float], fraction: float,
+                        min_ratio: float = OUTLIER_RATIO, keep_at_least: int = 8) -> list[str]:
+    """Beyond the app: the frames to leave out of training, worst first. At
+    most `fraction` of the frames (the highest values), and of those only
+    outliers (value > min_ratio x the median and > 0), never leaving fewer
+    than `keep_at_least` frames."""
+    names, values = list(names), [float(v) for v in values]
+    if fraction <= 0 or len(names) != len(values) or not values:
+        return []
+    med = float(np.median(values))
+    budget = min(int(len(values) * float(fraction)), max(0, len(values) - keep_at_least))
+    order = sorted(range(len(values)), key=lambda i: -values[i])[:budget]
+    return [names[i] for i in order if values[i] > 0 and values[i] > min_ratio * med]

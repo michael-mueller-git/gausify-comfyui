@@ -300,7 +300,8 @@
         "fixed",
         "gausify/orbit",
         16,
-        "holdout"
+        "holdout",
+        0.0
       ]
     },
     {
