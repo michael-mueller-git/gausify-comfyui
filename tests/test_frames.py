@@ -91,3 +91,26 @@ def test_video_max_side_rounding():
     frames = _stack(48, h=101, w=333)
     out, _ = select_frames(frames, 24.0, 4, max_side=100)
     assert out.shape[1:3] == (math.floor(101 * 100 / 333 + 0.5), 100)
+
+
+def test_filter_picks_blurry_and_duplicates():
+    from gausify.frames import filter_picks
+
+    rng = np.random.default_rng(0)
+    frames = rng.random((6, 20, 20, 3), dtype=np.float32)
+    frames[3] = frames[2]
+    picks = [{"index": i, "time": float(i), "sharpness": s} for i, s in enumerate([10, 10, 10, 10, 2, 10])]
+    kept, d = filter_picks(frames, picks)
+    assert kept == picks and d == {"duplicates": 0, "blurry": 0}
+    kept, d = filter_picks(frames, picks, skip_duplicates=True, min_sharpness=0.5)
+    assert [p["index"] for p in kept] == [0, 1, 2, 5] and d == {"duplicates": 1, "blurry": 1}
+
+
+def test_select_frames_reports_indices():
+    from gausify.frames import select_frames, select_masks
+
+    frames = np.random.default_rng(2).random((12, 20, 30, 3), dtype=np.float32)
+    out, t = select_frames(frames, None, 6, 15, 1)
+    assert len(t.indices) == len(out) == 6 and out.shape[1:3] == (10, 15)
+    m = select_masks(np.ones((12, 20, 30), np.float32), t.indices, 15, 10)
+    assert m.shape == (6, 10, 15) and m.min() == 1.0

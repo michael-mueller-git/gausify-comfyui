@@ -116,13 +116,15 @@ def orbit_centre(views: Sequence) -> tuple[np.ndarray, float]:
     return centre, max(radius, 1e-9)
 
 
-def _dilate(mask: np.ndarray, r: int) -> np.ndarray:
-    if r <= 0:
-        return mask
+def signed_distance(mask: np.ndarray) -> np.ndarray:
+    """Per pixel: distance (px) to the subject's edge, positive inside the
+    mask (>= 128), negative outside."""
     import cv2
 
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
-    return cv2.dilate(mask, k)
+    sub = (np.asarray(mask) >= 128).astype(np.uint8)
+    inside = cv2.distanceTransform(sub, cv2.DIST_L2, 5)
+    outside = cv2.distanceTransform(1 - sub, cv2.DIST_L2, 5)
+    return (inside - outside).astype(np.float32)
 
 
 def hull_counts(
@@ -133,10 +135,14 @@ def hull_counts(
     near: float,
     cancel: Callable[[], bool] | None = None,
     progress: Callable[[float, str], None] | None = None,
+    extent: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per splat: (number of views whose image contains its centre, of those
-    the number where it falls outside the subject mask dilated by `margin`
-    (fraction of the image's long side)). Without masks the second is 0."""
+    the number where it lies outside the subject mask grown by `margin`
+    (fraction of the image's long side)). With `extent` (world radius per
+    splat), a splat also counts as outside when its projected footprint
+    reaches past the grown mask (a blob centred on the subject that spills
+    far beyond it). Without masks the second is 0."""
     n = len(xyz)
     seen = np.zeros(n, dtype=np.int32)
     outside = np.zeros(n, dtype=np.int32)
@@ -156,15 +162,22 @@ def hull_counts(
         if m is not None:
             mh, mw = m.shape
             sx, sy = mw / v.width, mh / v.height
-            sub = (m >= 128).astype(np.uint8) * 255
-            sub = _dilate(sub, int(round(margin * max(mw, mh))))
+            sd = signed_distance(m)
             idx = np.nonzero(inside_img)[0]
             px = np.clip((u[idx] * sx).astype(np.int64), 0, mw - 1)
             py = np.clip((w[idx] * sy).astype(np.int64), 0, mh - 1)
-            outside[idx[sub[py, px] == 0]] += 1
+            reach = np.zeros(len(idx))
+            if extent is not None:
+                reach = extent[idx] * v.fx * sx / zs[idx]  # footprint radius in mask pixels
+            out = sd[py, px] + margin * max(mw, mh) < reach
+            outside[idx[out]] += 1
         if progress is not None:
             progress((k + 1) / len(views), f"clean: view {k + 1}/{len(views)}")
     return seen, outside
+
+
+#: Footprint radius of a splat in its largest-axis standard deviations (hull_extent).
+EXTENT_SIGMAS = 2.0
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -194,13 +207,19 @@ def clean_splat(
     max_size: float = 0.0,
     progress: Callable[[float, str], None] | None = None,
     cancel: Callable[[], bool] | None = None,
+    hull_extent: bool = False,
+    cache: dict | None = None,
 ) -> dict:
     """Writes the cleaned splat to `ply_out`; returns stats: input/kept counts
     and the splats removed per reason (a splat counts for the first reason
     that removes it, in the order hull, unseen, distance, opacity, size).
     `views`: posecheck.job.View-like (R, t world->camera, fx, fy, cx, cy,
     width, height). `masks(view)`: its subject mask (uint8, 255 = subject) or
-    None. 0 disables `max_distance`, `min_opacity` and `max_size`."""
+    None. 0 disables `max_distance`, `min_opacity` and `max_size`.
+    `hull_extent`: judge each splat by its footprint (EXTENT_SIGMAS x its
+    largest axis), not only its centre. `cache`: a dict kept between calls on
+    the same splat, views, masks, margin and extent: the per-view analysis is
+    reused (re-cleaning with another tolerance is then cheap)."""
     if not views:
         raise ValueError("no registered cameras to judge the splat with")
     ply = read_ply(ply_in)
@@ -222,9 +241,18 @@ def clean_splat(
 
     use_masks = masks if hull_carve else None
     need_views = use_masks is not None or drop_unseen
+    scale_f = [f for f in ("scale_0", "scale_1", "scale_2") if f in names]
+    log_max = np.max(np.stack([v[f].astype(np.float64) for f in scale_f], axis=1), axis=1) if scale_f else None
     if need_views and n:
-        seen, outside = hull_counts(xyz, spaced(views, MAX_VIEWS), use_masks, float(mask_margin),
-                                    NEAR * radius, cancel, progress)
+        key = (str(ply_in), use_masks is not None, float(mask_margin), bool(hull_extent))
+        if cache is not None and cache.get("key") == key:
+            seen, outside = cache["counts"]
+        else:
+            ext = EXTENT_SIGMAS * np.exp(log_max) if hull_extent and log_max is not None else None
+            seen, outside = hull_counts(xyz, spaced(views, MAX_VIEWS), use_masks, float(mask_margin),
+                                        NEAR * radius, cancel, progress, extent=ext)
+            if cache is not None:
+                cache.update(key=key, counts=(seen, outside))
         if use_masks is not None:
             frac = np.divide(outside, seen, out=np.zeros(n), where=seen > 0)
             drop("hull", (seen > 0) & (frac > float(hull_tolerance)))
@@ -234,10 +262,8 @@ def clean_splat(
         drop("distance", np.linalg.norm(xyz - centre, axis=1) > max_distance * radius)
     if min_opacity > 0 and "opacity" in names:
         drop("opacity", _sigmoid(v["opacity"]) < min_opacity)
-    scale_f = [f for f in ("scale_0", "scale_1", "scale_2") if f in names]
-    if max_size > 0 and scale_f:
-        big = np.exp(np.max(np.stack([v[f].astype(np.float64) for f in scale_f], axis=1), axis=1))
-        drop("size", big > max_size * radius)
+    if max_size > 0 and log_max is not None:
+        drop("size", np.exp(log_max) > max_size * radius)
     Path(ply_out).parent.mkdir(parents=True, exist_ok=True)
     write_ply(ply_out, ply, v[keep])
     return {
@@ -247,6 +273,7 @@ def clean_splat(
         "orbitCentre": [float(c) for c in centre],
         "orbitRadius": radius,
         "views": len(views),
+        "hullTolerance": float(hull_tolerance),
     }
 
 

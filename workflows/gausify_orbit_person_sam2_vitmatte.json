@@ -1,8 +1,8 @@
 {
   "id": "5b0c1d6e-6a5e-4c55-9a36-0b6f1a2c9e01",
   "revision": 0,
-  "last_node_id": 14,
-  "last_link_id": 19,
+  "last_node_id": 15,
+  "last_link_id": 22,
   "nodes": [
     {
       "id": 1,
@@ -24,7 +24,8 @@
           "name": "VIDEO",
           "type": "VIDEO",
           "links": [
-            1
+            1,
+            20
           ]
         }
       ],
@@ -48,7 +49,7 @@
         260
       ],
       "flags": {},
-      "order": 1,
+      "order": 7,
       "mode": 0,
       "inputs": [
         {
@@ -60,6 +61,11 @@
           "name": "images",
           "type": "IMAGE",
           "link": null
+        },
+        {
+          "name": "masks",
+          "type": "MASK",
+          "link": 21
         }
       ],
       "outputs": [
@@ -68,8 +74,6 @@
           "type": "IMAGE",
           "links": [
             2,
-            11,
-            12,
             13
           ]
         },
@@ -78,6 +82,13 @@
           "type": "ORBIT_TIMES",
           "links": [
             3
+          ]
+        },
+        {
+          "name": "masks",
+          "type": "MASK",
+          "links": [
+            22
           ]
         }
       ],
@@ -91,6 +102,8 @@
         4,
         0.0,
         -1.0,
+        0.0,
+        true,
         0.0
       ]
     },
@@ -112,7 +125,7 @@
       "outputs": [],
       "properties": {},
       "widgets_values": [
-        "Person workflow with SAM 2.1 large + ViTMatte. Needs two extra node packs (ComfyUI Manager): kijai/ComfyUI-segment-anything-2 and chflame163/ComfyUI_LayerStyle. The SAM 2.1 large and ViTMatte models are downloaded on first use.\n\nMasks: SAM2 Points turns the normalized points (default: chest and hips at the frame centre) into pixel coordinates for SAM2 on frame 0; SAM 2.1 large tracks the person through the selected frames. If it picks the wrong thing, move the points; for background points (label 0) also connect coordinates_negative. MaskEdgeUltraDetail V2 (VITMatte) then turns the hard SAM mask into a soft matte (hair, fingers): edge_erode/edte_dilate set the band it re-mattes around the SAM edge; raise edte_dilate for loose hair. max_megapixels 2.5 keeps 1920x1080 frames at full size. keep_model_loaded is off so SAM2 frees the GPU before training.\n\nEverything after the masks is the same as gausify_orbit_person.json: use_mask_for_poses, pose_check auto, more AKAZE features, 30k steps with SH 2, SSIM, reduce_haze, contribution pruning and Clean Splat."
+        "Person workflow with SAM 2.1 large + ViTMatte. Needs two extra node packs (ComfyUI Manager): kijai/ComfyUI-segment-anything-2 and chflame163/ComfyUI_LayerStyle. The SAM 2.1 large and ViTMatte models are downloaded on first use.\n\nMasks: SAM2 Points turns the normalized points (default: chest and hips at the frame centre) into pixel coordinates for SAM2 on frame 0; SAM 2.1 large tracks the person through every frame of the video (dense tracking works far better than on the sparse selected frames); Frame Select picks the masks of the frames it keeps, and VITMatte refines only those. Long or high-resolution videos need a lot of RAM/VRAM for SAM2: trim them or lower the resolution before tracking. If it picks the wrong thing, move the points; for background points (label 0) also connect coordinates_negative. MaskEdgeUltraDetail V2 (VITMatte) then turns the hard SAM mask into a soft matte (hair, fingers): edge_erode/edte_dilate set the band it re-mattes around the SAM edge; raise edte_dilate for loose hair. max_megapixels 2.5 keeps 1920x1080 frames at full size. keep_model_loaded is off so SAM2 frees the GPU before training.\n\nEverything after the masks is the same as gausify_orbit_person.json: use_mask_for_poses, pose_check auto, more AKAZE features, 30k steps with SH 2, SSIM, reduce_haze, contribution pruning and Clean Splat.\n\nFrame Select: skip_duplicates drops repeated frames of generated videos (fewer frames may come out)."
       ]
     },
     {
@@ -127,7 +140,7 @@
         300
       ],
       "flags": {},
-      "order": 9,
+      "order": 10,
       "mode": 0,
       "inputs": [
         {
@@ -194,7 +207,7 @@
         420
       ],
       "flags": {},
-      "order": 10,
+      "order": 11,
       "mode": 0,
       "inputs": [
         {
@@ -260,7 +273,7 @@
         480
       ],
       "flags": {},
-      "order": 12,
+      "order": 13,
       "mode": 0,
       "inputs": [
         {
@@ -292,7 +305,7 @@
         640
       ],
       "flags": {},
-      "order": 8,
+      "order": 9,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -345,7 +358,7 @@
         330
       ],
       "flags": {},
-      "order": 11,
+      "order": 12,
       "mode": 0,
       "inputs": [
         {
@@ -389,15 +402,18 @@
         0.0,
         0.0,
         0.0,
-        true
+        true,
+        false,
+        true,
+        0.3
       ]
     },
     {
       "id": 10,
       "type": "GausifyOrbitSam2Points",
       "pos": [
-        380,
-        560
+        40,
+        620
       ],
       "size": [
         320,
@@ -438,8 +454,8 @@
       "id": 11,
       "type": "DownloadAndLoadSAM2Model",
       "pos": [
-        380,
-        700
+        40,
+        720
       ],
       "size": [
         320,
@@ -472,8 +488,8 @@
       "id": 12,
       "type": "Sam2VideoSegmentationAddPoints",
       "pos": [
-        380,
-        860
+        40,
+        880
       ],
       "size": [
         320,
@@ -537,8 +553,8 @@
       "id": 13,
       "type": "Sam2VideoSegmentation",
       "pos": [
-        380,
-        1040
+        40,
+        1060
       ],
       "size": [
         320,
@@ -564,7 +580,7 @@
           "name": "mask",
           "type": "MASK",
           "links": [
-            18
+            21
           ]
         }
       ],
@@ -580,14 +596,14 @@
       "type": "LayerMask: MaskEdgeUltraDetail V2",
       "pos": [
         380,
-        1150
+        520
       ],
       "size": [
         320,
         330
       ],
       "flags": {},
-      "order": 7,
+      "order": 8,
       "mode": 0,
       "inputs": [
         {
@@ -598,7 +614,7 @@
         {
           "name": "mask",
           "type": "MASK",
-          "link": 18
+          "link": 22
         }
       ],
       "outputs": [
@@ -630,6 +646,52 @@
         "cuda",
         2.5
       ]
+    },
+    {
+      "id": 15,
+      "type": "GetVideoComponents",
+      "pos": [
+        40,
+        520
+      ],
+      "size": [
+        260,
+        80
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": 20
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            11,
+            12
+          ]
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": null
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GetVideoComponents"
+      },
+      "widgets_values": []
     }
   ],
   "links": [
@@ -699,7 +761,7 @@
     ],
     [
       11,
-      2,
+      15,
       0,
       10,
       0,
@@ -707,7 +769,7 @@
     ],
     [
       12,
-      2,
+      15,
       0,
       12,
       2,
@@ -754,19 +816,35 @@
       "SAM2INFERENCESTATE"
     ],
     [
-      18,
-      13,
-      0,
-      14,
-      1,
-      "MASK"
-    ],
-    [
       19,
       14,
       1,
       4,
       2,
+      "MASK"
+    ],
+    [
+      20,
+      1,
+      0,
+      15,
+      0,
+      "VIDEO"
+    ],
+    [
+      21,
+      13,
+      0,
+      2,
+      2,
+      "MASK"
+    ],
+    [
+      22,
+      2,
+      2,
+      14,
+      1,
       "MASK"
     ]
   ],

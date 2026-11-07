@@ -56,6 +56,8 @@ class OrbitTimes:
 
     times: list[float]
     from_images: bool = False
+    #: Source frame index of each selected frame (set by frames.select_frames).
+    indices: list[int] | None = None
 
 
 @dataclass

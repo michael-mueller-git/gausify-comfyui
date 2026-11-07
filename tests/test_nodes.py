@@ -26,9 +26,11 @@ from nodes.clean import GausifyCleanSplat  # noqa: E402
 from nodes.frame_select import GausifyFrameSelect  # noqa: E402
 from nodes.masks import GausifyMaskChroma, GausifyMaskRMBG, GausifyMaskSAM2, GausifySam2Points  # noqa: E402
 from nodes.poses import GausifyPoses  # noqa: E402
+from nodes.retouch import GausifyRetouchApply, GausifyRetouchClip  # noqa: E402
 from nodes.train import GausifyTrainAdvanced, GausifyTrainSplat, train_options  # noqa: E402
 
 MASK_NODES = (GausifyMaskChroma, GausifyMaskRMBG, GausifyMaskSAM2)
+NO_PRESET = (GausifyTrainAdvanced, GausifyCleanSplat, GausifySam2Points, GausifyRetouchClip, GausifyRetouchApply)
 
 
 @pytest.fixture
@@ -64,7 +66,7 @@ def test_mappings():
             assert cls.RETURN_TYPES == ("MASK", "STRING") and cls.RETURN_NAMES == ("masks", "stats")
             assert it["required"]["images"] == ("IMAGE",)
             continue
-        if cls in (GausifyTrainAdvanced, GausifyCleanSplat, GausifySam2Points):  # no preset
+        if cls in NO_PRESET:  # no preset
             assert "preset" not in it["required"]
             continue
         assert it["required"]["preset"][0] == PRESET_NAMES
@@ -72,7 +74,7 @@ def test_mappings():
     assert len(MASK_NODES) == 3 and all(c in nodes.NODE_CLASS_MAPPINGS.values() for c in MASK_NODES)
     assert {c for c in nodes.NODE_CLASS_MAPPINGS.values() if c not in MASK_NODES} == {
         GausifyFrameSelect, GausifyPoses, GausifyTrainSplat, GausifyTrainAdvanced, GausifyCleanSplat,
-        GausifySam2Points}
+        GausifySam2Points, GausifyRetouchClip, GausifyRetouchApply}
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskChroma"] == "Gausify Orbit Mask (Solid Colour)"
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskRMBG"] == "Gausify Orbit Mask (RMBG-1.4)"
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskSAM2"] == "Gausify Orbit Mask (SAM 2.1)"
@@ -99,7 +101,7 @@ def test_input_types_match_app_ranges():
     assert (f["required"]["max_side"][1]["min"], f["required"]["max_side"][1]["max"]) == (480, 3840)
     assert f["required"]["candidates"][1]["max"] == 8
     assert f["optional"]["video"][0] == "VIDEO" and f["optional"]["images"][0] == "IMAGE"
-    assert GausifyFrameSelect.RETURN_TYPES == ("IMAGE", "ORBIT_TIMES")
+    assert GausifyFrameSelect.RETURN_TYPES == ("IMAGE", "ORBIT_TIMES", "MASK")
 
     p = GausifyPoses.INPUT_TYPES()
     assert p["required"]["estimator"][0] == ["akaze", "colmap"]
@@ -185,14 +187,18 @@ def _fake_module(monkeypatch, name, **attrs):
 def test_frame_select_images(monkeypatch, comfy_dirs):
     calls = {}
 
-    def select_frames(frames, fps, target, max_side, oversample, trim_start, trim_end, progress=None, cancel=None):
+    def select_frames(frames, fps, target, max_side, oversample, trim_start, trim_end, progress=None, cancel=None,
+                      **filters):
         calls.update(shape=frames.shape, fps=fps, target=target, max_side=max_side, oversample=oversample,
                      trim=(trim_start, trim_end))
-        return frames[::2], OrbitTimes([float(i) for i in range(0, len(frames), 2)], from_images=fps is None)
+        calls["filters"] = {k: v for k, v in filters.items() if k != "stats"}
+        return frames[::2], OrbitTimes([float(i) for i in range(0, len(frames), 2)], from_images=fps is None,
+                                       indices=list(range(0, len(frames), 2)))
 
     _fake_module(monkeypatch, "gausify.frames", select_frames=select_frames)
     imgs = torch.rand(6, 8, 10, 3)
-    out, times = GausifyFrameSelect().select("preview", 600, 3840, 8, 0.0, -1.0, images=imgs, fps=0.0)
+    out, times, masks = GausifyFrameSelect().select("preview", 600, 3840, 8, 0.0, -1.0, images=imgs, fps=0.0)
+    assert masks is None and calls.pop("filters") == {"skip_duplicates": False, "min_sharpness": 0.0}
     assert calls == {"shape": (6, 8, 10, 3), "fps": None, "target": 90, "max_side": 1280, "oversample": 3,
                      "trim": (0.0, None)}
     assert tuple(out.shape) == (3, 8, 10, 3) and out.dtype == torch.float32
@@ -204,7 +210,8 @@ def test_frame_select_video(monkeypatch, comfy_dirs):
 
     seen = {}
     _fake_module(monkeypatch, "gausify.frames",
-                 select_frames=lambda f, fps, *a, **kw: (seen.update(fps=fps, a=a) or f, OrbitTimes([0.0] * len(f))))
+                 select_frames=lambda f, fps, *a, **kw: (seen.update(fps=fps, a=a) or f,
+                                                         OrbitTimes([0.0] * len(f), indices=list(range(len(f))))))
 
     class Video:
         def get_components(self):
@@ -214,6 +221,35 @@ def test_frame_select_video(monkeypatch, comfy_dirs):
     assert abs(seen["fps"] - 29.97) < 0.01 and seen["a"] == (40, 640, 2, 1.5, 3.0)
     with pytest.raises(ValueError):
         GausifyFrameSelect().select("custom", 40, 640, 2, 0.0, -1.0)
+
+
+def test_frame_select_masks_follow_the_picks(comfy_dirs):
+    """Real selection: the masks of the picked source frames come out, resized."""
+    rng = np.random.default_rng(0)
+    n = 30
+    imgs = torch.from_numpy(rng.random((n, 40, 60, 3), dtype=np.float32))
+    masks = torch.zeros(n, 40, 60)
+    for i in range(n):
+        masks[i, :, i] = 1.0  # column i marks source frame i
+    out, times, sel = GausifyFrameSelect().select("custom", 20, 480, 2, 0.0, -1.0, images=imgs, fps=10.0,
+                                                  masks=masks)
+    assert sel.shape == (len(out), 40, 60) and len(times.indices) == len(out)
+    for k, i in enumerate(times.indices):
+        assert sel[k, :, i].min() == 1.0 and float(sel[k].sum()) == 40.0
+    with pytest.raises(ValueError, match="source frames"):
+        GausifyFrameSelect().select("custom", 20, 480, 2, 0.0, -1.0, images=imgs, fps=10.0, masks=masks[:5])
+
+
+def test_frame_select_drops_duplicates(comfy_dirs):
+    rng = np.random.default_rng(1)
+    base = rng.random((10, 30, 40, 3), dtype=np.float32)
+    frozen = np.repeat(base, 3, axis=0)  # every frame repeated 3x: 30 frames, 10 distinct
+    imgs = torch.from_numpy(frozen)
+    out, times, _ = GausifyFrameSelect().select("custom", 30, 480, 1, 0.0, -1.0, images=imgs, fps=0.0)
+    assert len(out) == 30
+    out, times, _ = GausifyFrameSelect().select("custom", 30, 480, 1, 0.0, -1.0, images=imgs, fps=0.0,
+                                                skip_duplicates=True)
+    assert len(out) == 10 and [i // 3 for i in times.indices] == list(range(10))
 
 
 def _fake_model(names):
@@ -420,7 +456,7 @@ def test_example_workflow_matches_nodes(workflow, mask_node):
     assert {"GausifyOrbitFrameSelect", "GausifyOrbitPoses", "GausifyOrbitTrainSplat", mask_node} <= set(by_type)
     for name, cls in nodes.NODE_CLASS_MAPPINGS.items():
         if name not in by_type:  # alternative mask nodes; Train Advanced, Clean Splat, SAM2 Points are optional
-            assert cls in MASK_NODES or cls in (GausifyTrainAdvanced, GausifyCleanSplat, GausifySam2Points), name
+            assert cls in MASK_NODES or cls in NO_PRESET, name
             continue
         n = by_type[name]
         it = cls.INPUT_TYPES()
@@ -456,6 +492,7 @@ THIRD_PARTY_WIDGETS = {
     "Sam2VideoSegmentationAddPoints": 2,  # frame_index, object_index
     "Sam2VideoSegmentation": 1,  # keep_model_loaded
     "LayerMask: MaskEdgeUltraDetail V2": 10,
+    "GetVideoComponents": 0,  # core ComfyUI (comfy_extras/nodes_video.py)
 }
 
 
@@ -470,6 +507,17 @@ def test_sam2_vitmatte_workflow():
     poses_masks = next(i for i in by_type["GausifyOrbitPoses"]["inputs"] if i["name"] == "masks")
     src = links[poses_masks["link"]]
     assert src[1] == vit["id"] and src[2] == 1  # the refined mask, not the RGBA image
+    # dense tracking: SAM2 sees every source frame, Frame Select picks its masks for ViTMatte
+    fs = by_type["GausifyOrbitFrameSelect"]
+    seg = by_type["Sam2VideoSegmentation"]
+    fs_masks = next(i for i in fs["inputs"] if i["name"] == "masks")
+    assert links[fs_masks["link"]][1] == seg["id"]
+    vit_mask = next(i for i in vit["inputs"] if i["name"] == "mask")
+    vit_image = next(i for i in vit["inputs"] if i["name"] == "image")
+    assert links[vit_mask["link"]][1:3] == [fs["id"], 2] and links[vit_image["link"]][1:3] == [fs["id"], 0]
+    add = by_type["Sam2VideoSegmentationAddPoints"]
+    add_image = next(i for i in add["inputs"] if i["name"] == "image")
+    assert links[add_image["link"]][1] == by_type["GetVideoComponents"]["id"]
     # same training settings as the person workflow
     person = {n["type"]: n for n in json.loads((ROOT / "workflows" / "gausify_orbit_person.json").read_text())["nodes"]}
     for t in ("GausifyOrbitFrameSelect", "GausifyOrbitPoses", "GausifyOrbitTrainSplat",
@@ -511,7 +559,7 @@ def test_person_workflow_settings():
     adv = GausifyTrainAdvanced().settings(**values("GausifyOrbitTrainAdvanced"))[0]
     assert adv == {"contrib-prune-min-views": 3}
     c = values("GausifyOrbitCleanSplat")
-    assert c["hull_carve"] and c["check_psnr"]
+    assert c["hull_carve"] and c["check_psnr"] and c["auto_tolerance"]
     links = {link[0]: link for link in wf["links"]}
     clean_id = by_type["GausifyOrbitCleanSplat"]["id"]
     assert links[by_type["Preview3D"]["inputs"][0]["link"]][1] == clean_id  # Preview3D shows the cleaned splat

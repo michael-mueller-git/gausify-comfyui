@@ -13,15 +13,17 @@ sharp-frame selection, camera poses (AKAZE + incremental SfM, or COLMAP's SIFT
 
 | Node | Inputs | Outputs |
 |---|---|---|
-| **Gausify Orbit Frame Select** | `video` (core VIDEO) or `images` + `fps` (0 = image sequence); preset, frames, max_side, candidates, trim_start, trim_end (-1 = end) | IMAGE, ORBIT_TIMES |
+| **Gausify Orbit Frame Select** | `video` (core VIDEO) or `images` + `fps` (0 = image sequence); preset, frames, max_side, candidates, trim_start, trim_end (-1 = end); skip_duplicates, min_sharpness; `masks` (optional, one per source frame) | IMAGE, ORBIT_TIMES, MASK (the picked frames' masks) |
 | **Gausify Orbit Mask (Solid Colour)** | images; auto_color, color, tolerance, softness, contiguous | MASK, stats (JSON) |
 | **Gausify Orbit Mask (RMBG-1.4)** | images; accept_noncommercial_license, device | MASK, stats (JSON) |
 | **Gausify Orbit Mask (SAM 2.1)** | images; prompt_frame, box, points, variant (`fp32`/`fp16`), device | MASK, stats (JSON) |
 | **Gausify Orbit Poses** | images, frame_times, masks (optional); preset, estimator (`akaze`/`colmap`), match_window, closed_loop, flat_orbit, fill_missing, use_mask_for_poses, pose_check (`off`/`auto`/`always`, needs masks), sfm_max_side + max_features (AKAZE limits, app: 1600 / 4000) | GAUSIFY_CAMERAS, colmap_path, stats (JSON) |
 | **Gausify Orbit Train Splat** | cameras; preset, steps, sh_degree, max_splats (millions), max_resolution, ssim, reduce_haze (masked only), psnr, despill + strength (masked only), seed, filename_prefix, psnr_holdout_every, final_frames (`holdout`/`all_frames`); advanced (optional) | ply_path (relative to the output folder), num_splats, psnr |
 | **Gausify Orbit Train Advanced** | Brush settings: growth, contribution pruning, regularisers (opacity, volume, flatten, normal consistency), learning-rate multipliers. Defaults are Brush's own, so connecting it unchanged does nothing | advanced → Train Splat |
-| **Gausify Orbit Clean Splat** | cameras, ply_path; hull_carve + hull_tolerance + mask_margin (masked only), drop_unseen, max_distance, min_opacity, max_size, check_psnr | ply_path (`<splat>_clean.ply`), num_splats, stats (JSON) |
+| **Gausify Orbit Clean Splat** | cameras, ply_path; hull_carve + hull_tolerance + mask_margin (masked only), drop_unseen, max_distance, min_opacity, max_size, check_psnr, hull_extent, auto_tolerance + max_psnr_drop | ply_path (`<splat>_clean.ply`), num_splats, stats (JSON) |
 | **Gausify Orbit SAM2 Points** | images; points (normalized `x,y,label;...`) | coordinates_positive, coordinates_negative (pixel JSON for kijai's SAM2 nodes) |
+| **Gausify Orbit Retouch Clip** | cameras, ply_path; motion (`wave`, `orbit_below`/`_above`, `arc_below`/`_above`), tilt, photo, seconds, fps, long_side | reference (IMAGE), alpha (MASK), clip, info |
+| **Gausify Orbit Retouch Apply** | cameras, ply_path, clip, restored (IMAGE); steps, restored_ratio, max_splats, max_resolution, ssim, reduce_haze, despill + strength, seed; advanced (optional) | ply_path (`<splat>_retouch.ply`), num_splats, stats (JSON) |
 
 `preset` (`preview`, `balanced`, `quality`, `custom`) is the app's quality
 preset: anything but `custom` overrides the node's preset-controlled widgets
@@ -36,6 +38,14 @@ is held out to measure PSNR, so the saved splat never sees those frames.
 `final_frames = all_frames` then trains a second time on every frame and saves
 that splat (about twice the time; `psnr` comes from the first run). With `psnr`
 off, every frame is used and training runs once.
+
+Frame selection extras (off by default, as in the app): `skip_duplicates`
+drops picks that repeat the previous one (frozen or repeated frames of
+generated videos), `min_sharpness` drops picks blurrier than that fraction of
+the median sharpness (e.g. 0.4). Fewer frames may come out. `masks` takes one
+mask per source frame (e.g. SAM2 tracking on the whole video, where tracking
+works best). The `masks` output holds the picked frames' masks at the frames'
+size, ready for the Poses node.
 
 ### Cleaning up the splat
 
@@ -53,6 +63,40 @@ the dataset's cameras, and saves `<splat>_clean.ply` next to the input:
   masks), nearly transparent ones, and huge ones (largest axis in orbit radii, e.g. 0.1).
 - `check_psnr`: it renders 12 training views before and after and puts both PSNRs in
   `stats`. A clear drop means the clean-up cut into the subject.
+- `hull_extent`: it judges each splat by its footprint (2x its largest axis) instead
+  of only its centre. This also removes big blobs centred on the subject that
+  spill far past its silhouette.
+- `auto_tolerance` (with `check_psnr`): if the PSNR drops by more than
+  `max_psnr_drop` (0.3 dB), it retries with `hull_tolerance` +0.15 (up to 0.85).
+  `stats.auto` lists the tries.
+
+### Retouch: fill in angles the orbit missed
+
+A port of the app's Retouch ([docs](https://github.com/obraia/gausify-orbit)):
+
+1. **Gausify Orbit Retouch Clip** renders the splat along a camera path that
+   starts at a real photo and goes through angles the video didn't cover:
+   - `wave`: a full loop, above then below the photos
+   - `orbit_below` / `orbit_above`: a full loop at another height
+   - `arc_below` / `arc_above`: a third of the orbit around `photo`
+
+   `tilt` is the height change in degrees. Frames are rounded to 8n + 1 (LTX).
+   `info` warns when the camera moves faster than 30 deg/s, which video models
+   blur, and suggests a longer duration. The app's view-based motions (from the
+   3D view, recorded motion) need its viewer and aren't ported.
+2. Restore `reference` with any ComfyUI video workflow, e.g. LTX with an IC-LoRA
+   (see the app's `assets/workflows/ltx-2.5-refinement.json`). The result needs the same
+   number of frames and aspect ratio; the size may change.
+3. **Gausify Orbit Retouch Apply** fine-tunes the splat from itself (Brush
+   `init.ply`) on the photos plus some of the restored frames:
+   - `restored_ratio` caps the restored frames at a fraction of the photo count
+     (default 0.25). More frames pull the splat toward details the video model
+     invented.
+   - The fine-tune runs `steps` (default 3000) with a 10x lower position learning
+     rate. Growth stops at half.
+   - The restored frames take the render's alpha, so the subject stays a cut-out.
+
+   It saves `<splat>_retouch.ply`. Put Clean Splat after it if you like.
 
 ### Recommended settings for people
 
@@ -119,7 +163,7 @@ selected frames. With these packs, you get better edges than the built-in nodes
 
 Suggested chains for people:
 
-1. Frame Select → SAM 2.1 large (segment-anything-2) → MaskEdgeUltraDetail V2 (VITMatte) → Poses `masks`.
+1. SAM 2.1 large (segment-anything-2) on every video frame → Frame Select `masks` → MaskEdgeUltraDetail V2 (VITMatte) on Frame Select's images and masks → Poses `masks`.
    Ready-made: [`workflows/gausify_orbit_person_sam2_vitmatte.json`](workflows/gausify_orbit_person_sam2_vitmatte.json)
    (the person workflow with these masks). **Gausify Orbit SAM2 Points** converts normalized points
    (`x,y,label;...`, default chest and hips at the centre) into the pixel coordinates kijai's

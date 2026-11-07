@@ -221,3 +221,103 @@ def test_clean_node(monkeypatch, tmp_path):
     assert "hull" not in s["removed"] and "note" in s and "psnr" not in s
     with pytest.raises(FileNotFoundError):
         node.clean(cams, "g/missing.ply", True, 0.25, 1.0, True, 0.0, 0.0, 0.0, False)
+
+
+def test_hull_extent_removes_spilling_blobs(tmp_path):
+    c = (0.0, 0.0, 0.0)
+    views = orbit_views(centre=c)
+    xyz = np.array([[0, 0, 0], [0.1, 0, 0], [0, 0.45, 0]], np.float32)
+    # 0: small splat at the centre; 1: blob of radius ~1.2 (2 sigma) centred on the subject;
+    # 2: small splat just inside the silhouette's edge
+    scale = np.log(np.array([0.01, 0.6, 0.01], np.float32))
+    make_ply(tmp_path / "in.ply", xyz, scale=scale)
+    masks = {v.name: disc_mask(v, c) for v in views}
+    s = clean_splat(tmp_path / "in.ply", tmp_path / "out.ply", views, lambda v: masks[v.name])
+    assert s["kept"] == 3  # by centre: all inside
+    s = clean_splat(tmp_path / "in.ply", tmp_path / "out.ply", views, lambda v: masks[v.name], hull_extent=True)
+    out = read_ply(tmp_path / "out.ply").vertex
+    assert sorted(out["f_rest_8"].astype(int).tolist()) == [0, 2] and s["removed"]["hull"] == 1
+
+
+def test_cache_reuses_the_view_analysis(tmp_path, monkeypatch):
+    import gausify.splat_clean as sc
+
+    c = (0.0, 0.0, 0.0)
+    views = orbit_views(centre=c)
+    subject, floaters = scene(np.random.default_rng(4), c)
+    make_ply(tmp_path / "in.ply", np.concatenate([subject, floaters]).astype(np.float32))
+    masks = {v.name: disc_mask(v, c) for v in views}
+    calls = []
+    real = sc.hull_counts
+    monkeypatch.setattr(sc, "hull_counts", lambda *a, **k: calls.append(1) or real(*a, **k))
+    cache: dict = {}
+    a = clean_splat(tmp_path / "in.ply", tmp_path / "out.ply", views, lambda v: masks[v.name], hull_tolerance=0.1,
+                    cache=cache)
+    b = clean_splat(tmp_path / "in.ply", tmp_path / "out.ply", views, lambda v: masks[v.name], hull_tolerance=0.9,
+                    cache=cache)
+    assert len(calls) == 1 and b["kept"] >= a["kept"] and b["hullTolerance"] == 0.9
+    clean_splat(tmp_path / "in.ply", tmp_path / "out.ply", views, lambda v: masks[v.name], mask_margin=0.05,
+                cache=cache)
+    assert len(calls) == 2  # another margin: recomputed
+
+
+def test_clean_node_auto_tolerance(monkeypatch, tmp_path):
+    pytest.importorskip("torch")
+    from nodes import clean as clean_node
+
+    cams, out_dir = _node_dataset(monkeypatch, tmp_path)
+    seen_tols = []
+    import gausify.splat_clean as sc
+
+    real_clean = sc.clean_splat
+
+    def spy(*a, **k):
+        seen_tols.append(k["hull_tolerance"])
+        return real_clean(*a, **k)
+
+    monkeypatch.setattr(sc, "clean_splat", spy)
+
+    n0 = len(read_ply(out_dir / "g" / "orbit_00001.ply").vertex)
+
+    def fake_psnr(plys, views, target, max_side=800, render=None):
+        # PSNR falls by 0.001 dB per removed splat
+        return [30.0 - 0.001 * (n0 - len(read_ply(p).vertex)) for p in plys]
+
+    monkeypatch.setattr(sc, "render_psnr", fake_psnr)
+    node = clean_node.GausifyCleanSplat()
+    r = node.clean(cams, "g/orbit_00001.ply", True, 0.0, 1.0, True, 0.0, 0.0, 0.0, True, False, True, 0.01)
+    s = json.loads(r["result"][2])
+    assert len(seen_tols) >= 2 and seen_tols == sorted(seen_tols) and seen_tols[0] == 0.0
+    assert s["auto"]["tries"][0]["tolerance"] == 0.0 and len(s["auto"]["tries"]) == len(seen_tols)
+    assert s["hullTolerance"] == seen_tols[-1]
+    # off: a single pass
+    seen_tols.clear()
+    node.clean(cams, "g/orbit_00001.ply", True, 0.0, 1.0, True, 0.0, 0.0, 0.0, True, False, False, 0.01)
+    assert seen_tols == [0.0]
+
+
+def _node_dataset(monkeypatch, tmp_path):
+    from gausify.colmap_io import write_model
+    from gausify.types import OrbitCameras, Pose, SfmModel
+    from nodes import common
+
+    out_dir = tmp_path / "output"
+    (out_dir / "g").mkdir(parents=True)
+    fp = types.SimpleNamespace(get_output_directory=lambda: str(out_dir), get_temp_directory=lambda: str(tmp_path))
+    monkeypatch.setattr(common, "folder_paths", fp)
+    c = (0.0, 0.0, 0.0)
+    views = orbit_views(n=12, centre=c)
+    root = tmp_path / "ds"
+    (root / "images").mkdir(parents=True)
+    (root / "masks").mkdir()
+    for v in views:
+        cv2.imwrite(str(root / "images" / v.name), np.full((H, W, 3), 128, np.uint8))
+        cv2.imwrite(str(root / "masks" / v.name), disc_mask(v, c))
+    model = SfmModel(width=W, height=H, f=F, cx=W / 2, cy=H / 2,
+                     poses=[Pose(R=np.asarray(v.R), t=np.asarray(v.t)) for v in views], points=[],
+                     names=[v.name for v in views])
+    write_model(model, root / "sparse" / "0", model.names)
+    cams = OrbitCameras(root=root, names=model.names, width=W, height=H, masked=True)
+    subject, floaters = scene(np.random.default_rng(3), c)
+    make_ply(out_dir / "g" / "orbit_00001.ply", np.concatenate([subject, floaters]).astype(np.float32))
+    return cams, out_dir

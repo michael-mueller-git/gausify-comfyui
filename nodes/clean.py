@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
+from gausify.splat_clean import EXTENT_SIGMAS
 from gausify.types import OrbitCameras
 
 from .common import CATEGORY, Progress, interrupted, output_dir, raise_if_interrupted, run_cancellable
@@ -18,6 +19,8 @@ log = logging.getLogger("gausify.nodes")
 
 #: Views rendered for the PSNR check (evenly spaced).
 CHECK_VIEWS = 12
+#: auto_tolerance: step and ceiling of hull_tolerance.
+AUTO_STEP, AUTO_MAX_TOLERANCE = 0.15, 0.85
 
 
 def resolve_ply(ply_path: str) -> tuple[Path, Path]:
@@ -76,11 +79,21 @@ class GausifyCleanSplat:
                 "check_psnr": ("BOOLEAN", {"default": True, "tooltip": (
                     f"Render {CHECK_VIEWS} training views before and after and report their PSNR: a clear drop "
                     "means the clean-up removed part of the subject (loosen hull_tolerance / mask_margin).")}),
+                "hull_extent": ("BOOLEAN", {"default": False, "tooltip": (
+                    f"Hull carving judges each splat by its footprint ({EXTENT_SIGMAS:g} x its largest axis), "
+                    "not only its centre: also removes big blobs centred on the subject that spill far past "
+                    "its silhouette.")}),
+                "auto_tolerance": ("BOOLEAN", {"default": False, "tooltip": (
+                    "With check_psnr and hull carving: if the training-view PSNR drops by more than "
+                    "max_psnr_drop, retry with a looser hull_tolerance (+0.15 per try, up to 0.85).")}),
+                "max_psnr_drop": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 10.0, "step": 0.05,
+                                            "tooltip": "auto_tolerance: largest acceptable PSNR drop (dB)."}),
             },
         }
 
     def clean(self, cameras: OrbitCameras, ply_path, hull_carve, hull_tolerance, mask_margin, drop_unseen,
-              max_distance, min_opacity, max_size, check_psnr):
+              max_distance, min_opacity, max_size, check_psnr, hull_extent=False, auto_tolerance=False,
+              max_psnr_drop=0.3):
         from gausify.posecheck.job import read_views
         from gausify.splat_clean import clean_splat, render_psnr, spaced
 
@@ -97,15 +110,23 @@ class GausifyCleanSplat:
             f = masks_dir / f"{Path(v.name).stem}.png"
             return _load_u8(f, gray=True) if f.is_file() else None
 
+        carve = bool(hull_carve) and masked
+        auto = bool(auto_tolerance) and bool(check_psnr) and carve
         progress = Progress()
-        stats = run_cancellable(
-            clean_splat, src, out, views, mask_of if masked else None,
-            hull_carve=bool(hull_carve) and masked, hull_tolerance=float(hull_tolerance),
-            mask_margin=float(mask_margin) / 100.0, drop_unseen=bool(drop_unseen),
-            max_distance=float(max_distance), min_opacity=float(min_opacity), max_size=float(max_size),
-            progress=progress.sub(0.0, 0.8 if check_psnr else 1.0), cancel=interrupted,
-        )
-        raise_if_interrupted()
+        cache: dict = {}
+
+        def run(tol: float, prog) -> dict:
+            st = run_cancellable(
+                clean_splat, src, out, views, mask_of if masked else None,
+                hull_carve=carve, hull_tolerance=tol, mask_margin=float(mask_margin) / 100.0,
+                drop_unseen=bool(drop_unseen), max_distance=float(max_distance), min_opacity=float(min_opacity),
+                max_size=float(max_size), progress=prog, cancel=interrupted, hull_extent=bool(hull_extent),
+                cache=cache,
+            )
+            raise_if_interrupted()
+            return st
+
+        stats = run(float(hull_tolerance), progress.sub(0.0, 0.7 if check_psnr else 1.0))
         if hull_carve and not masked:
             stats["note"] = "hull carving needs masks: skipped"
         if check_psnr and stats["kept"]:
@@ -122,11 +143,23 @@ class GausifyCleanSplat:
                 a = cv2.resize(erode(m, ALPHA_ERODE), (w, h), interpolation=cv2.INTER_AREA).astype(np.float32)
                 return rgb * (a[..., None] / 255.0)  # premultiplied, like the render
 
+            check_views = spaced(views, CHECK_VIEWS)
             try:
-                progress.sub(0.8, 1.0)(0.0, "clean: PSNR check")
-                before, after = run_cancellable(render_psnr, [src, out], spaced(views, CHECK_VIEWS), target)
+                progress.sub(0.7, 1.0)(0.0, "clean: PSNR check")
+                before, after = run_cancellable(render_psnr, [src, out], check_views, target)
+                tries = [{"tolerance": round(float(hull_tolerance), 3), "psnr": round(after, 3)}]
+                tol = float(hull_tolerance)
+                while auto and before - after > float(max_psnr_drop) and tol < AUTO_MAX_TOLERANCE - 1e-9:
+                    tol = min(AUTO_MAX_TOLERANCE, tol + AUTO_STEP)
+                    progress.sub(0.7, 1.0)(0.0, f"clean: retry with hull_tolerance {tol:.2f}")
+                    stats = run(tol, None)
+                    (after,) = run_cancellable(render_psnr, [out], check_views, target)
+                    tries.append({"tolerance": round(tol, 3), "psnr": round(after, 3)})
                 stats["psnr"] = {"before": round(before, 3), "after": round(after, 3),
                                  "change": round(after - before, 3)}
+                if auto:
+                    stats["auto"] = {"tries": tries, "maxDrop": float(max_psnr_drop),
+                                     "met": before - after <= float(max_psnr_drop)}
             except Exception as e:  # the cleaned splat stays usable
                 raise_if_interrupted()
                 log.warning("gausify clean: PSNR check failed: %s", e)
@@ -140,5 +173,7 @@ class GausifyCleanSplat:
         p = stats.get("psnr", {})
         if "change" in p:
             text += f", training-view PSNR {p['before']:.2f} -> {p['after']:.2f} dB"
+        if "auto" in stats and len(stats["auto"]["tries"]) > 1:
+            text += f" (auto: hull_tolerance {stats['hullTolerance']:.2f})"
         log.info("gausify clean: %s", text)
         return {"ui": {"text": [text]}, "result": (rel, int(stats["kept"]), json.dumps(stats, indent=2))}

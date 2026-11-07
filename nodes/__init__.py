@@ -4,6 +4,7 @@ from .clean import GausifyCleanSplat
 from .frame_select import GausifyFrameSelect
 from .masks import GausifyMaskChroma, GausifyMaskRMBG, GausifyMaskSAM2, GausifySam2Points
 from .poses import GausifyPoses
+from .retouch import GausifyRetouchApply, GausifyRetouchClip
 from .train import GausifyTrainAdvanced, GausifyTrainSplat
 
 NODE_CLASS_MAPPINGS = {
@@ -16,6 +17,8 @@ NODE_CLASS_MAPPINGS = {
     "GausifyOrbitTrainAdvanced": GausifyTrainAdvanced,
     "GausifyOrbitCleanSplat": GausifyCleanSplat,
     "GausifyOrbitSam2Points": GausifySam2Points,
+    "GausifyOrbitRetouchClip": GausifyRetouchClip,
+    "GausifyOrbitRetouchApply": GausifyRetouchApply,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -28,6 +31,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "GausifyOrbitTrainAdvanced": "Gausify Orbit Train Advanced",
     "GausifyOrbitCleanSplat": "Gausify Orbit Clean Splat",
     "GausifyOrbitSam2Points": "Gausify Orbit SAM2 Points (for kijai's SAM2)",
+    "GausifyOrbitRetouchClip": "Gausify Orbit Retouch Clip",
+    "GausifyOrbitRetouchApply": "Gausify Orbit Retouch Apply",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

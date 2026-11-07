@@ -60,6 +60,11 @@
           "name": "images",
           "type": "IMAGE",
           "link": null
+        },
+        {
+          "name": "masks",
+          "type": "MASK",
+          "link": null
         }
       ],
       "outputs": [
@@ -77,6 +82,11 @@
           "links": [
             3
           ]
+        },
+        {
+          "name": "masks",
+          "type": "MASK",
+          "links": null
         }
       ],
       "properties": {
@@ -89,6 +99,8 @@
         3,
         0.0,
         -1.0,
+        0.0,
+        false,
         0.0
       ]
     },
