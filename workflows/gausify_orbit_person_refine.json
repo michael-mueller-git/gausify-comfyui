@@ -1,0 +1,711 @@
+{
+  "id": "7d3e2a91-4b8c-4f0e-9c1a-5e6f7a8b9c02",
+  "revision": 0,
+  "last_node_id": 11,
+  "last_link_id": 14,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadVideo",
+      "pos": [
+        40,
+        120
+      ],
+      "size": [
+        300,
+        420
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "links": [
+            1
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadVideo"
+      },
+      "widgets_values": [
+        "orbit.mp4",
+        "image"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "GausifyOrbitFrameSelect",
+      "pos": [
+        380,
+        120
+      ],
+      "size": [
+        320,
+        260
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": 1
+        },
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "masks",
+          "type": "MASK",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            2,
+            6
+          ]
+        },
+        {
+          "name": "frame_times",
+          "type": "ORBIT_TIMES",
+          "links": [
+            3
+          ]
+        },
+        {
+          "name": "masks",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GausifyOrbitFrameSelect"
+      },
+      "widgets_values": [
+        "quality",
+        220,
+        1920,
+        4,
+        0.0,
+        -1.0,
+        0.0,
+        true,
+        0.0
+      ]
+    },
+    {
+      "id": 3,
+      "type": "Note",
+      "pos": [
+        380,
+        420
+      ],
+      "size": [
+        380,
+        520
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "Person workflow with pose refinement. Recommended settings for a person (a camera orbiting someone who stands still, real or AI-generated).\n\nMask: SAM 2.1 tracks the object at the centre of frame 0, usually the person. If it picks the wrong thing, set a box on prompt_frame (e.g. 0.3,0.05,0.7,0.98) or points. With masks the splat is a cut-out.\n\nPoses: use_mask_for_poses keeps features on the person, so a background that does not move with the orbit (AI backgrounds, turntables) cannot pull the cameras. For a real orbit with a rich static background and little texture on the person, try turning it off. max_features 8000 / sfm_max_side 1920 find more matches on skin and plain clothes. pose_check auto corrects inconsistent poses, fill_missing adds frames SfM could not register.\n\nTrain: 30k steps, SH degree 2 (skin and fabric sheen), SSIM, reduce_haze (less fog around the silhouette). psnr is off so every frame trains the splat; turn it on with final_frames = all_frames to get a PSNR and still train on every frame (twice the time).\n\nTrain Advanced: contribution pruning (min views 3) removes ghosts and doubled edges, e.g. from small movements of the person. opac_solid_weight is left at 0: it hardens hair edges.\n\nClean Splat: removes splats outside the masks' visual hull (floaters, ghost silhouette) and saves <splat>_clean.ply, which Preview3D shows. Its stats report the training-view PSNR before and after; a clear drop means it cut into the person; auto_tolerance then retries with a looser hull_tolerance until the drop is at most 0.3 dB.\n\nFrame Select: skip_duplicates drops repeated frames of generated videos (fewer frames may come out).\n\nTrain: drop_inconsistent 0.1 leaves out up to 10% of the frames the pose check finds inconsistent (the person moved, or the pose is off): only clear outliers, so a clean orbit loses nothing.\n\nRefine Poses: pass 1 (15k steps) trains a splat only to measure the poses against: Refine Poses renders it from every camera, matches each render with its photo (ALIKED-LightGlue, downloaded on first use) and corrects the poses that clearly disagree (its stats list every frame). Pass 2 trains the final splat on the refined poses: less ghosting, sharper detail. Corrections are capped (max_rotation 2 deg, max_shift 3% of the orbit radius); correct poses are left alone. For a further round, chain another Refine Poses + Train Splat. About 1.5x the time of the single-pass workflow; needs a GPU to be practical."
+      ]
+    },
+    {
+      "id": 4,
+      "type": "GausifyOrbitPoses",
+      "pos": [
+        740,
+        120
+      ],
+      "size": [
+        320,
+        300
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 2
+        },
+        {
+          "name": "frame_times",
+          "type": "ORBIT_TIMES",
+          "link": 3
+        },
+        {
+          "name": "masks",
+          "type": "MASK",
+          "link": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "cameras",
+          "type": "GAUSIFY_CAMERAS",
+          "links": [
+            4,
+            10
+          ]
+        },
+        {
+          "name": "colmap_path",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "stats",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GausifyOrbitPoses"
+      },
+      "widgets_values": [
+        "custom",
+        "akaze",
+        20,
+        true,
+        false,
+        true,
+        true,
+        "auto",
+        1920,
+        8000
+      ]
+    },
+    {
+      "id": 5,
+      "type": "GausifyOrbitTrainSplat",
+      "pos": [
+        1100,
+        120
+      ],
+      "size": [
+        320,
+        420
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "cameras",
+          "type": "GAUSIFY_CAMERAS",
+          "link": 4
+        },
+        {
+          "name": "advanced",
+          "type": "GAUSIFY_TRAIN_SETTINGS",
+          "link": 8
+        }
+      ],
+      "outputs": [
+        {
+          "name": "ply_path",
+          "type": "STRING",
+          "links": [
+            9
+          ]
+        },
+        {
+          "name": "num_splats",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "psnr",
+          "type": "FLOAT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GausifyOrbitTrainSplat"
+      },
+      "widgets_values": [
+        "custom",
+        15000,
+        2,
+        3.0,
+        1920,
+        true,
+        true,
+        false,
+        false,
+        100,
+        42,
+        "fixed",
+        "gausify/person_pass1",
+        16,
+        "all_frames",
+        0.1,
+        0.0
+      ],
+      "title": "Train Splat (pass 1, for Refine Poses)"
+    },
+    {
+      "id": 6,
+      "type": "Preview3D",
+      "pos": [
+        2540,
+        120
+      ],
+      "size": [
+        420,
+        480
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model_file",
+          "type": "STRING",
+          "widget": {
+            "name": "model_file"
+          },
+          "link": 5
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "Preview3D"
+      },
+      "widgets_values": [
+        ""
+      ]
+    },
+    {
+      "id": 7,
+      "type": "GausifyOrbitMaskSAM2",
+      "pos": [
+        380,
+        650
+      ],
+      "size": [
+        320,
+        220
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "masks",
+          "type": "MASK",
+          "links": [
+            7
+          ]
+        },
+        {
+          "name": "stats",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GausifyOrbitMaskSAM2"
+      },
+      "widgets_values": [
+        0,
+        "",
+        "",
+        "fp32",
+        "auto"
+      ]
+    },
+    {
+      "id": 8,
+      "type": "GausifyOrbitTrainAdvanced",
+      "pos": [
+        740,
+        480
+      ],
+      "size": [
+        320,
+        640
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "advanced",
+          "type": "GAUSIFY_TRAIN_SETTINGS",
+          "links": [
+            8,
+            12
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GausifyOrbitTrainAdvanced"
+      },
+      "widgets_values": [
+        200,
+        0.0025,
+        0.25,
+        15000,
+        0.5,
+        0.004,
+        0.1,
+        0.1,
+        50.0,
+        3,
+        0.2,
+        0.2,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        "l1_ssim",
+        0.1,
+        "default",
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "id": 9,
+      "type": "GausifyOrbitCleanSplat",
+      "pos": [
+        2180,
+        120
+      ],
+      "size": [
+        320,
+        330
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "cameras",
+          "type": "GAUSIFY_CAMERAS",
+          "link": 14
+        },
+        {
+          "name": "ply_path",
+          "type": "STRING",
+          "link": 13
+        }
+      ],
+      "outputs": [
+        {
+          "name": "ply_path",
+          "type": "STRING",
+          "links": [
+            5
+          ]
+        },
+        {
+          "name": "num_splats",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "stats",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GausifyOrbitCleanSplat"
+      },
+      "widgets_values": [
+        true,
+        0.25,
+        1.0,
+        true,
+        0.0,
+        0.0,
+        0.0,
+        true,
+        false,
+        true,
+        0.3
+      ]
+    },
+    {
+      "id": 10,
+      "type": "GausifyOrbitRefinePoses",
+      "pos": [
+        1460,
+        120
+      ],
+      "size": [
+        320,
+        220
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "cameras",
+          "type": "GAUSIFY_CAMERAS",
+          "link": 10
+        },
+        {
+          "name": "ply_path",
+          "type": "STRING",
+          "link": 9
+        }
+      ],
+      "outputs": [
+        {
+          "name": "cameras",
+          "type": "GAUSIFY_CAMERAS",
+          "links": [
+            11,
+            14
+          ]
+        },
+        {
+          "name": "stats",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GausifyOrbitRefinePoses"
+      },
+      "widgets_values": [
+        1024,
+        2048,
+        40,
+        2.0,
+        3.0
+      ]
+    },
+    {
+      "id": 11,
+      "type": "GausifyOrbitTrainSplat",
+      "pos": [
+        1820,
+        120
+      ],
+      "size": [
+        320,
+        420
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "cameras",
+          "type": "GAUSIFY_CAMERAS",
+          "link": 11
+        },
+        {
+          "name": "advanced",
+          "type": "GAUSIFY_TRAIN_SETTINGS",
+          "link": 12
+        }
+      ],
+      "outputs": [
+        {
+          "name": "ply_path",
+          "type": "STRING",
+          "links": [
+            13
+          ]
+        },
+        {
+          "name": "num_splats",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "psnr",
+          "type": "FLOAT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GausifyOrbitTrainSplat"
+      },
+      "widgets_values": [
+        "custom",
+        30000,
+        2,
+        3.0,
+        1920,
+        true,
+        true,
+        false,
+        false,
+        100,
+        42,
+        "fixed",
+        "gausify/person",
+        16,
+        "all_frames",
+        0.1,
+        0.0
+      ],
+      "title": "Train Splat (pass 2, refined poses)"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "VIDEO"
+    ],
+    [
+      2,
+      2,
+      0,
+      4,
+      0,
+      "IMAGE"
+    ],
+    [
+      3,
+      2,
+      1,
+      4,
+      1,
+      "ORBIT_TIMES"
+    ],
+    [
+      4,
+      4,
+      0,
+      5,
+      0,
+      "GAUSIFY_CAMERAS"
+    ],
+    [
+      5,
+      9,
+      0,
+      6,
+      0,
+      "STRING"
+    ],
+    [
+      6,
+      2,
+      0,
+      7,
+      0,
+      "IMAGE"
+    ],
+    [
+      7,
+      7,
+      0,
+      4,
+      2,
+      "MASK"
+    ],
+    [
+      8,
+      8,
+      0,
+      5,
+      1,
+      "GAUSIFY_TRAIN_SETTINGS"
+    ],
+    [
+      9,
+      5,
+      0,
+      10,
+      1,
+      "STRING"
+    ],
+    [
+      10,
+      4,
+      0,
+      10,
+      0,
+      "GAUSIFY_CAMERAS"
+    ],
+    [
+      11,
+      10,
+      0,
+      11,
+      0,
+      "GAUSIFY_CAMERAS"
+    ],
+    [
+      12,
+      8,
+      0,
+      11,
+      1,
+      "GAUSIFY_TRAIN_SETTINGS"
+    ],
+    [
+      13,
+      11,
+      0,
+      9,
+      1,
+      "STRING"
+    ],
+    [
+      14,
+      10,
+      0,
+      9,
+      0,
+      "GAUSIFY_CAMERAS"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.8,
+      "offset": [
+        0,
+        0
+      ]
+    }
+  },
+  "version": 0.4
+}

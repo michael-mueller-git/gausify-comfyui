@@ -578,6 +578,35 @@ def test_refine_poses_node(monkeypatch, comfy_dirs, tmp_path):
     assert len(calls) == 3
 
 
+def test_refine_workflow_wiring():
+    wf = json.loads((ROOT / "workflows" / "gausify_orbit_person_refine.json").read_text())
+    by_id = {n["id"]: n for n in wf["nodes"]}
+    links = {lk[0]: lk for lk in wf["links"]}
+
+    def source(node, name):
+        inp = next(i for i in node["inputs"] if i["name"] == name)
+        return by_id[links[inp["link"]][1]]
+
+    trains = [n for n in wf["nodes"] if n["type"] == "GausifyOrbitTrainSplat"]
+    refine = next(n for n in wf["nodes"] if n["type"] == "GausifyOrbitRefinePoses")
+    clean = next(n for n in wf["nodes"] if n["type"] == "GausifyOrbitCleanSplat")
+    assert len(trains) == 2
+    widgets = [k for k in GausifyTrainSplat.INPUT_TYPES()["required"] if k != "cameras"]
+    for t in trains:
+        assert len(t["widgets_values"]) == len(widgets) + 1  # + control_after_generate
+        assert source(t, "advanced")["type"] == "GausifyOrbitTrainAdvanced"
+    first = source(refine, "ply_path")
+    second = source(clean, "ply_path")
+    assert first in trains and second in trains and first is not second
+    assert source(first, "cameras")["type"] == "GausifyOrbitPoses" and source(refine, "cameras")["type"] == "GausifyOrbitPoses"
+    assert source(second, "cameras") is refine and source(clean, "cameras") is refine
+    assert first["widgets_values"][12] != second["widgets_values"][12]  # separate filename prefixes
+    assert len(refine["widgets_values"]) == len(GausifyRefinePoses.INPUT_TYPES()["required"]) - 2
+    defaults = [v[1]["default"] for k, v in GausifyRefinePoses.INPUT_TYPES()["required"].items()
+                if k not in ("cameras", "ply_path")]
+    assert refine["widgets_values"] == defaults
+
+
 def test_train_advanced_node():
     it = GausifyTrainAdvanced.INPUT_TYPES()["required"]
     d = _defaults(GausifyTrainAdvanced)
@@ -610,7 +639,8 @@ def test_train_advanced_node():
 
 @pytest.mark.parametrize("workflow, mask_node", [("gausify_orbit.json", "GausifyOrbitMaskChroma"),
                                                  ("gausify_orbit_person.json", "GausifyOrbitMaskSAM2"),
-                                                 ("gausify_orbit_person_sam2_vitmatte.json", "GausifyOrbitSam2Points")])
+                                                 ("gausify_orbit_person_sam2_vitmatte.json", "GausifyOrbitSam2Points"),
+                                                 ("gausify_orbit_person_refine.json", "GausifyOrbitMaskSAM2")])
 def test_example_workflow_matches_nodes(workflow, mask_node):
     wf = json.loads((ROOT / "workflows" / workflow).read_text())
     by_type = {n["type"]: n for n in wf["nodes"]}

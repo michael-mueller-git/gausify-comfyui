@@ -145,6 +145,12 @@ rotation and a sideways shift look alike. The world frame, the intrinsics and
 the 3D points stay as they were. The output is a new dataset folder (frames
 hard-linked), so the Poses node's cache is untouched.
 
+[`workflows/gausify_orbit_person_refine.json`](workflows/gausify_orbit_person_refine.json)
+is the person workflow with this built in: a 15k-step first pass
+(`gausify/person_pass1`), Refine Poses, then the 30k-step final training on
+the refined poses, cleaned and previewed. That's about 1.5x the time of the
+single-pass workflow.
+
 Since the splat was also fitted to the wrong poses, one round under-corrects:
 train, refine, train again. A second refine round on the new splat corrects
 further. Needs the ALIKED-LightGlue model (downloaded on first use) and, to be
