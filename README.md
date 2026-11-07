@@ -101,6 +101,31 @@ Despill: with a green or blue screen, enable `despill` on the Train node. It
 is meant for Solid Colour masks (as in the app, where only chroma-key masks
 are despilled): it needs a saturated green or blue background in the masked-out area.
 
+### Masks from other node packs
+
+The Poses node takes any `MASK` batch with one mask per Frame Select image
+(white = subject, soft values allowed; resized to the frames if needed). Put
+the mask nodes after Frame Select, on its `IMAGE` output, so the masks match the
+selected frames. With these packs, you get better edges than the built-in nodes
+(the built-in SAM 2.1 tiny decodes 256x256 masks, RMBG-1.4 works at 1024x1024):
+
+| Pack | Nodes | Use | Model license |
+|---|---|---|---|
+| [ComfyUI-segment-anything-2](https://github.com/kijai/ComfyUI-segment-anything-2) (kijai) | SAM 2.1 video segmentation, tiny / small / base_plus / large | Tracking with point prompts; large keeps arms and legs as the person turns | Apache-2.0 |
+| [ComfyUI-RMBG](https://github.com/1038lab/ComfyUI-RMBG) (1038lab) | BiRefNet (incl. BiRefNet-HR up to 2048 px and a matting variant), BEN2, RMBG-2.0, SAM2 | Per-frame cut-out, no prompt; often enough for one person on a calm background | BiRefNet MIT; **RMBG-2.0 non-commercial**; others: see the pack |
+| [ComfyUI_LayerStyle](https://github.com/chflame163/ComfyUI_LayerStyle) | MaskEdgeUltraDetail V2 (VITMatte, PyMatting, GuidedFilter) | Refines a coarse mask (SAM, BiRefNet) into a soft alpha for hair and edges | ViTMatte MIT |
+| [ComfyUI-KJNodes](https://github.com/kijai/ComfyUI-KJNodes) | Grow Mask With Blur | Grows, shrinks or feathers a mask (e.g. one that cuts into the edge) | no model |
+
+Suggested chains for people:
+
+1. Frame Select → SAM 2.1 large (segment-anything-2) → MaskEdgeUltraDetail V2 (VITMatte) → Poses `masks`
+2. Frame Select → BiRefNet-HR or BiRefNet matting (ComfyUI-RMBG) → Poses `masks`. Simplest, but frame by frame: check it picks the person in every frame.
+
+Soft mattes become the alpha of the training frames, so hair keeps its
+transparency. Clean Splat treats masks at 50% (value 128) as the edge, and
+`mask_margin` protects the soft border. Check each pack's README for its own
+install steps and model downloads.
+
 ONNX Runtime: the nodes need `onnxruntime-gpu`. The plain `onnxruntime` package
 conflicts with it (both provide the same module); if another node pack
 installed it, `pip uninstall onnxruntime` first, then reinstall `onnxruntime-gpu`.
