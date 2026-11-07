@@ -19,7 +19,7 @@ sharp-frame selection, camera poses (AKAZE + incremental SfM, or COLMAP's SIFT
 | **Gausify Orbit Mask (SAM 2.1)** | images; prompt_frame, box, points, variant (`fp32`/`fp16`), device | MASK, stats (JSON) |
 | **Gausify Orbit Poses** | images, frame_times, masks (optional); preset, estimator (`akaze`/`aliked_lightglue`/`colmap`), match_window, closed_loop, flat_orbit, fill_missing, use_mask_for_poses, pose_check (`off`/`auto`/`always`, needs masks), sfm_max_side + max_features (AKAZE / ALIKED limits, app: 1600 / 4000) | GAUSIFY_CAMERAS, colmap_path, stats (JSON) |
 | **Gausify Orbit Train Splat** | cameras; preset, steps, sh_degree, max_splats (millions), max_resolution, ssim, reduce_haze (masked only), psnr, despill + strength (masked only), seed, filename_prefix, psnr_holdout_every, final_frames (`holdout`/`all_frames`), drop_inconsistent, deflicker; advanced (optional) | ply_path (relative to the output folder), num_splats, psnr |
-| **Gausify Orbit Train Advanced** | Brush settings: growth, contribution pruning, regularisers (opacity, volume, flatten, normal consistency), learning-rate multipliers, loss (`l1_ssim` = Brush's/the app's, or `l1_ssim_lpips` + lpips_weight). Defaults are Brush's own, so connecting it unchanged does nothing | advanced → Train Splat |
+| **Gausify Orbit Train Advanced** | Brush settings: growth, contribution pruning, regularisers (opacity, volume, flatten, normal consistency), learning-rate multipliers, loss (`l1_ssim` = Brush's/the app's, or `l1_ssim_lpips` + lpips_weight), render_mode (`default`/`mip`), masked_bg_grey + masked_bg_noise (masked training background, app: 0.5 / 0.5). Defaults are Brush's own (the background: the app's), so connecting it unchanged does nothing | advanced → Train Splat |
 | **Gausify Orbit Clean Splat** | cameras, ply_path; hull_carve + hull_tolerance + mask_margin (masked only), drop_unseen, max_distance, min_opacity, max_size, check_psnr, hull_extent, auto_tolerance + max_psnr_drop | ply_path (`<splat>_clean.ply`), num_splats, stats (JSON) |
 | **Gausify Orbit SAM2 Points** | images; points (normalized `x,y,label;...`) | coordinates_positive, coordinates_negative (pixel JSON for kijai's SAM2 nodes) |
 | **Gausify Orbit Retouch Clip** | cameras, ply_path; motion (`wave`, `orbit_below`/`_above`, `arc_below`/`_above`), tilt, photo, seconds, fps, long_side | reference (IMAGE), alpha (MASK), clip, info |
@@ -66,6 +66,20 @@ loss (VGG, built into brush-cli) to L1 + SSIM, weighted by `lpips_weight`
 (default 0.1; 0.05-0.2 is typical, more can add high-frequency artefacts).
 It gives sharper hair, fabric and skin texture, at the cost of slower steps
 and more GPU memory. `l1_ssim` (the default) is the current loss.
+
+Anti-aliasing: Train Advanced's `render_mode = mip` trains with
+Mip-Splatting's 2D filter. The splat then stays clean when viewed closer or
+farther than the orbit (less aliasing, fewer bloated small splats). The mode is
+recorded in the .ply (`comment SplatRenderMode: mip`), and Brush and this pack's
+renders (Clean Splat, Retouch, pose check) use it. Viewers that ignore it show
+slightly different fine edges.
+
+Masked background: masked training composites the cut-outs over a random
+grey each step (the app: 0.5 +- 0.5), which forces clean transparency.
+`masked_bg_grey` / `masked_bg_noise` change it. Less noise converges faster but
+can leave fringes at the silhouette in the colour of that background. A
+fixed background matching your viewer (e.g. grey 0, noise 0.1 for black) hides
+them there. Unmasked training ignores these settings.
 
 Frame selection extras (off by default, as in the app): `skip_duplicates`
 drops picks that repeat the previous one (frozen or repeated frames of

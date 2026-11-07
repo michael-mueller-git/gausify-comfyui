@@ -166,7 +166,7 @@ class GausifyRetouchApply:
               advanced=None, deflicker=0.0):
         from gausify import brush
         from gausify.retouch import build_retouch_dataset, sh_degree_of
-        from gausify.train_config import to_cli_args, train_config
+        from gausify.train_config import merge_advanced, to_cli_args, train_config
 
         src, root = resolve_ply(ply_path)
         out_ply = src.with_name(f"{src.stem}_retouch.ply")
@@ -207,8 +207,7 @@ class GausifyRetouchApply:
 
                 # the retouch dataset is always a copy
                 stats["droppedPhotos"] = len(_drop_inconsistent(cameras, ds, float(drop_inconsistent)))
-            cfg = dict(train_config(opts, masked))
-            cfg.update(advanced or {})
+            cfg = merge_advanced(dict(train_config(opts, masked)), advanced, masked)
             # The fine-tune's own settings win over the advanced ones (as the app).
             cfg["lr-mean"], cfg["growth-stop-iter"] = LR_MEAN, opts["growth_stop_iter"]
             cfg["export-every"] = steps

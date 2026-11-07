@@ -12,7 +12,15 @@ from pathlib import Path
 from gausify.deflicker import WINDOW as DEFLICKER_WINDOW
 from gausify.posecheck.score import OUTLIER_RATIO
 from gausify.presets import DEFAULT_PRESET, PRESETS, REDUCE_HAZE_WEIGHT
-from gausify.train_config import ADVANCED, DEFAULT_LPIPS_WEIGHT, LOSSES, advanced_config
+from gausify.train_config import (
+    ADVANCED,
+    DEFAULT_LPIPS_WEIGHT,
+    LOSSES,
+    MASKED_BACKGROUND,
+    RENDER_MODES,
+    advanced_config,
+    merge_advanced,
+)
 from gausify.types import OrbitCameras
 
 from .common import (
@@ -152,8 +160,7 @@ class GausifyTrainSplat:
         dropped = []
         if float(drop_inconsistent) > 0:
             dropped = _drop_inconsistent(cameras, dataset if work is not None else None, float(drop_inconsistent))
-        cfg = dict(train_config(opts, masked))
-        cfg.update(advanced or {})
+        cfg = merge_advanced(dict(train_config(opts, masked)), advanced, masked)
         cfg["export-every"] = opts["export_every"]
         cfg["seed"] = int(seed)
         retrain = bool(opts["eval_split_every"]) and final_frames == "all_frames"
@@ -276,6 +283,22 @@ class GausifyTrainAdvanced:
                                          "round": False, "tooltip": (
                                              "With loss l1_ssim_lpips: weight of the LPIPS term (0.05-0.2 "
                                              "typical; higher can add high-frequency artefacts).")})
+        req["render_mode"] = (RENDER_MODES, {"default": RENDER_MODES[0], "tooltip": (
+            "default: Brush's rasteriser (the app). mip: Mip-Splatting's 2D anti-aliasing filter, so the splat "
+            "stays clean viewed closer or farther than the orbit (less aliasing, fewer bloated small splats). "
+            "Recorded in the .ply: Brush (and this pack's renders) use it; viewers that ignore it show "
+            "slightly different fine edges.")})
+        req["masked_bg_grey"] = ("FLOAT", {"default": MASKED_BACKGROUND["color"][0], "min": 0.0, "max": 1.0,
+                                           "step": 0.05, "round": False, "tooltip": (
+                                               "Masked training only: the grey level the cut-outs are trained "
+                                               "against each step (0 = black, 1 = white; the app: 0.5).")})
+        req["masked_bg_noise"] = ("FLOAT", {"default": MASKED_BACKGROUND["noise"], "min": 0.0, "max": 1.0,
+                                            "step": 0.05, "round": False, "tooltip": (
+                                                "Masked training only: random change of that background each step "
+                                                "(+- this; the app: 0.5 = any grey). Random backgrounds force "
+                                                "clean transparency (no haze baked in); less noise converges "
+                                                "faster but can leave dark or light fringes at the silhouette "
+                                                "matching the training background.")})
         return {"required": req}
 
     def settings(self, **values):

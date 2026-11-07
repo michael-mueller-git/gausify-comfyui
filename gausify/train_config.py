@@ -166,6 +166,22 @@ ADVANCED = {
 LOSSES = ["l1_ssim", "l1_ssim_lpips"]
 DEFAULT_LPIPS_WEIGHT = 0.1
 
+#: Train Advanced "render_mode": Brush's rasteriser. mip = Mip-Splatting's 2D
+#: anti-aliasing filter (with opacity compensation); recorded in the .ply.
+RENDER_MODES = ["default", "mip"]
+
+#: Brush keys of the masked-training background: only passed when masked.
+MASKED_ONLY = ("background-color", "background-noise-strength")
+
+
+def merge_advanced(cfg: dict, advanced: dict | None, masked: bool) -> dict:
+    """`cfg` updated with the Train Advanced settings; the masked-training
+    background only when `masked` (unmasked training keeps Brush's)."""
+    for k, v in (advanced or {}).items():
+        if masked or k not in MASKED_ONLY:
+            cfg[k] = v
+    return cfg
+
 
 def advanced_config(values: dict) -> dict:
     """Brush keys (kebab-case) for the advanced settings that differ from
@@ -178,6 +194,16 @@ def advanced_config(values: dict) -> dict:
         raise ValueError(f"unknown loss {loss!r} (expected one of {LOSSES})")
     if loss == "l1_ssim_lpips" and lpips_weight > 0:
         out["lpips-loss-weight"] = lpips_weight
+    mode = values.pop("render_mode", RENDER_MODES[0])
+    if mode not in RENDER_MODES:
+        raise ValueError(f"unknown render_mode {mode!r} (expected one of {RENDER_MODES})")
+    if mode != "default":
+        out["render-mode"] = mode
+    grey = float(values.pop("masked_bg_grey", MASKED_BACKGROUND["color"][0]))
+    noise = float(values.pop("masked_bg_noise", MASKED_BACKGROUND["noise"]))
+    if (grey, noise) != (MASKED_BACKGROUND["color"][0], MASKED_BACKGROUND["noise"]):
+        out["background-color"] = [grey, grey, grey]
+        out["background-noise-strength"] = noise
     for name, v in values.items():
         if name not in ADVANCED:
             raise KeyError(f"unknown advanced setting {name!r}")

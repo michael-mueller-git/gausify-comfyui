@@ -543,7 +543,7 @@ def test_train_advanced_node():
     d = _defaults(GausifyTrainAdvanced)
     assert GausifyTrainAdvanced().settings(**d) == ({},)  # Brush's defaults: nothing passed
     for k, (kind, o) in it.items():
-        if k != "loss":
+        if k not in ("loss", "render_mode"):
             assert o["min"] <= o["default"] <= o["max"], k
     assert d["growth_stop_iter"] == 15000 and d["refine_every"] == 200
     # LPIPS: selectable; the default (current) loss passes nothing
@@ -551,6 +551,21 @@ def test_train_advanced_node():
     assert GausifyTrainAdvanced().settings(**{**d, "lpips_weight": 0.3}) == ({},)
     assert GausifyTrainAdvanced().settings(**{**d, "loss": "l1_ssim_lpips"}) == ({"lpips-loss-weight": 0.1},)
     assert GausifyTrainAdvanced().settings(**{**d, "loss": "l1_ssim_lpips", "lpips_weight": 0.0}) == ({},)
+    # render mode and the masked background (defaults: the app's, nothing passed)
+    assert it["render_mode"][0] == ["default", "mip"] and (d["masked_bg_grey"], d["masked_bg_noise"]) == (0.5, 0.5)
+    assert GausifyTrainAdvanced().settings(**{**d, "render_mode": "mip"}) == ({"render-mode": "mip"},)
+    bg = GausifyTrainAdvanced().settings(**{**d, "masked_bg_grey": 0.0, "masked_bg_noise": 0.1})[0]
+    assert bg == {"background-color": [0.0, 0.0, 0.0], "background-noise-strength": 0.1}
+    from gausify.train_config import merge_advanced, to_cli_args, train_config
+
+    opts = {"total_steps": 1000, "sh_degree": 1, "max_splats": 1000, "max_resolution": 960, "ssim_weight": 0.0,
+            "export_every": 1000}
+    masked = to_cli_args(merge_advanced(train_config(opts, True), {**bg, "render-mode": "mip"}, True))
+    assert masked[masked.index("--background-color") + 1 : masked.index("--background-color") + 4] == ["0", "0", "0"]
+    assert masked[masked.index("--background-noise-strength") + 1] == "0.1"
+    assert masked[masked.index("--render-mode") + 1] == "mip"
+    plain = merge_advanced(train_config(opts, False), {**bg, "render-mode": "mip"}, False)
+    assert "background-color" not in plain and plain["render-mode"] == "mip"  # unmasked: Brush's background
 
 
 @pytest.mark.parametrize("workflow, mask_node", [("gausify_orbit.json", "GausifyOrbitMaskChroma"),
