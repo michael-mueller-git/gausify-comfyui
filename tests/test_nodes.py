@@ -29,10 +29,11 @@ from nodes.poses import GausifyPoses  # noqa: E402
 from nodes.refine import GausifyRefinePoses  # noqa: E402
 from nodes.retouch import GausifyRetouchApply, GausifyRetouchClip  # noqa: E402
 from nodes.train import GausifyTrainAdvanced, GausifyTrainSplat, train_options  # noqa: E402
+from nodes.transform import GausifyCenterSplat, GausifyTransformSplat  # noqa: E402
 
 MASK_NODES = (GausifyMaskChroma, GausifyMaskRMBG, GausifyMaskSAM2)
 NO_PRESET = (GausifyTrainAdvanced, GausifyCleanSplat, GausifySam2Points, GausifyRetouchClip, GausifyRetouchApply,
-             GausifyRefinePoses)
+             GausifyRefinePoses, GausifyCenterSplat, GausifyTransformSplat)
 
 
 @pytest.fixture
@@ -76,7 +77,8 @@ def test_mappings():
     assert len(MASK_NODES) == 3 and all(c in nodes.NODE_CLASS_MAPPINGS.values() for c in MASK_NODES)
     assert {c for c in nodes.NODE_CLASS_MAPPINGS.values() if c not in MASK_NODES} == {
         GausifyFrameSelect, GausifyPoses, GausifyTrainSplat, GausifyTrainAdvanced, GausifyCleanSplat,
-        GausifySam2Points, GausifyRetouchClip, GausifyRetouchApply, GausifyRefinePoses}
+        GausifySam2Points, GausifyRetouchClip, GausifyRetouchApply, GausifyRefinePoses, GausifyCenterSplat,
+        GausifyTransformSplat}
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskChroma"] == "Gausify Orbit Mask (Solid Colour)"
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskRMBG"] == "Gausify Orbit Mask (RMBG-1.4)"
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskSAM2"] == "Gausify Orbit Mask (SAM 2.1)"
@@ -578,6 +580,75 @@ def test_refine_poses_node(monkeypatch, comfy_dirs, tmp_path):
     assert len(calls) == 3
 
 
+def _write_splat(path, P):
+    from gausify.splat_clean import Ply, write_ply
+
+    names = ("x", "y", "z", "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
+             "f_dc_0", "f_dc_1", "f_dc_2", *[f"f_rest_{i}" for i in range(9)])
+    v = np.zeros(len(P), np.dtype([(k, "<f4") for k in names]))
+    for i, k in enumerate("xyz"):
+        v[k] = P[:, i]
+    v["opacity"], v["rot_0"] = 3.0, 1.0
+    header = ["ply", "format binary_little_endian 1.0", "comment SplatRenderMode: mip", "comment Vertical axis: 0 -1 0",
+              f"element vertex {len(v)}", *[f"property float {k}" for k in names]]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_ply(path, Ply(header=header, vertex=v))
+
+
+def test_center_and_transform_nodes(comfy_dirs):
+    from gausify.splat_clean import read_ply
+
+    out_dir, _ = comfy_dirs
+    rng = np.random.default_rng(0)
+    # a figure 2 tall standing along -y (COLMAP-like), its feet at y = 5, shifted in x/z
+    P = np.stack([rng.uniform(-0.2, 0.2, 3000) + 3, rng.uniform(3, 5, 3000), rng.uniform(-0.2, 0.2, 3000) - 1], 1)
+    _write_splat(out_dir / "t" / "x.ply", P)
+    d = _defaults(GausifyCenterSplat)
+    assert (d["anchor"], d["upright"], d["up_axis"]) == ("feet", True, "+y")
+    r = GausifyCenterSplat().center("t/x.ply", **{k: v for k, v in d.items() if k != "ply_path"})
+    rel, tr = r["result"]
+    assert rel == "t/x_centered.ply" and "upright (+y, up from shape)" in r["ui"]["text"][0]
+    c = read_ply(out_dir / rel)
+    assert "comment SplatRenderMode: mip" in c.header
+    axis = next(h for h in c.header if h.startswith("comment Vertical axis:")).split(":")[1].split()
+    np.testing.assert_allclose([float(x) for x in axis], [0, 1, 0], atol=0.02)  # Brush's up, rotated along
+    lo, hi = np.percentile(np.stack([c.vertex[k] for k in "xyz"], 1), [1, 99], axis=0)
+    assert abs(lo[1]) < 0.05 and 1.9 < hi[1] < 2.0 and np.abs((lo + hi)[[0, 2]] / 2).max() < 0.05
+    assert json.loads(tr)["info"]["anchor"] == "feet"
+    # move the centred splat up by 1
+    t = _defaults(GausifyTransformSplat)
+    assert t["scale"] == 1.0 and t["offset_x"] == 0.0
+    r = GausifyTransformSplat().transform(rel, **{**{k: v for k, v in t.items() if k != "ply_path"}, "offset_y": 1.0})
+    rel2, tr2 = r["result"]
+    m = read_ply(out_dir / rel2)
+    assert rel2 == "t/x_centered_moved.ply" and json.loads(tr2)["translation"] == [0.0, 1.0, 0.0]
+    np.testing.assert_allclose(m.vertex["y"], c.vertex["y"] + 1, atol=1e-5)
+    # replaying the centring on the raw splat gives the centred one
+    r = GausifyTransformSplat().transform("t/x.ply", **{k: v for k, v in t.items() if k != "ply_path"}, transform=tr)
+    np.testing.assert_allclose(read_ply(out_dir / r["result"][0]).vertex["y"], c.vertex["y"], atol=1e-5)
+
+
+@pytest.mark.parametrize("workflow", ["gausify_orbit_person.json", "gausify_orbit_person_sam2_vitmatte.json",
+                                      "gausify_orbit_person_refine.json"])
+def test_person_workflows_center_last(workflow):
+    wf = json.loads((ROOT / "workflows" / workflow).read_text())
+    by_id = {n["id"]: n for n in wf["nodes"]}
+    links = {lk[0]: lk for lk in wf["links"]}
+
+    def source(node, name):
+        inp = next(i for i in node["inputs"] if i["name"] == name)
+        return by_id[links[inp["link"]][1]]
+
+    center = next(n for n in wf["nodes"] if n["type"] == "GausifyOrbitCenterSplat")
+    clean = next(n for n in wf["nodes"] if n["type"] == "GausifyOrbitCleanSplat")
+    preview = next(n for n in wf["nodes"] if n["type"] == "Preview3D")
+    assert source(preview, "model_file") is center and source(center, "ply_path") is clean
+    assert source(center, "cameras") is source(clean, "cameras")  # the cameras the splat was trained on
+    defaults = [v[1]["default"] for k, v in GausifyCenterSplat.INPUT_TYPES()["required"].items() if k != "ply_path"]
+    assert center["widgets_values"] == defaults
+    assert wf["last_node_id"] == max(by_id) and wf["last_link_id"] == max(links)
+
+
 def test_refine_workflow_wiring():
     wf = json.loads((ROOT / "workflows" / "gausify_orbit_person_refine.json").read_text())
     by_id = {n["id"]: n for n in wf["nodes"]}
@@ -754,7 +825,9 @@ def test_person_workflow_settings():
     assert c["hull_carve"] and c["check_psnr"] and c["auto_tolerance"]
     links = {link[0]: link for link in wf["links"]}
     clean_id = by_type["GausifyOrbitCleanSplat"]["id"]
-    assert links[by_type["Preview3D"]["inputs"][0]["link"]][1] == clean_id  # Preview3D shows the cleaned splat
+    center = links[by_type["Preview3D"]["inputs"][0]["link"]][1]
+    assert center == by_type["GausifyOrbitCenterSplat"]["id"]  # Preview3D shows the cleaned splat, centred
+    assert links[by_type["GausifyOrbitCenterSplat"]["inputs"][0]["link"]][1] == clean_id
 
 
 # ---------------------------------------------------------------- mask nodes

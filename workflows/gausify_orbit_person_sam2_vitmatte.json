@@ -1,8 +1,8 @@
 {
   "id": "5b0c1d6e-6a5e-4c55-9a36-0b6f1a2c9e01",
   "revision": 0,
-  "last_node_id": 15,
-  "last_link_id": 22,
+  "last_node_id": 16,
+  "last_link_id": 24,
   "nodes": [
     {
       "id": 1,
@@ -125,7 +125,7 @@
       "outputs": [],
       "properties": {},
       "widgets_values": [
-        "Person workflow with SAM 2.1 large + ViTMatte. Needs two extra node packs (ComfyUI Manager): kijai/ComfyUI-segment-anything-2 and chflame163/ComfyUI_LayerStyle. The SAM 2.1 large and ViTMatte models are downloaded on first use.\n\nMasks: SAM2 Points turns the normalized points (default: chest and hips at the frame centre) into pixel coordinates for SAM2 on frame 0; SAM 2.1 large tracks the person through every frame of the video (dense tracking works far better than on the sparse selected frames); Frame Select picks the masks of the frames it keeps, and VITMatte refines only those. Long or high-resolution videos need a lot of RAM/VRAM for SAM2: trim them or lower the resolution before tracking. If it picks the wrong thing, move the points; for background points (label 0) also connect coordinates_negative. MaskEdgeUltraDetail V2 (VITMatte) then turns the hard SAM mask into a soft matte (hair, fingers): edge_erode/edte_dilate set the band it re-mattes around the SAM edge; raise edte_dilate for loose hair. max_megapixels 2.5 keeps 1920x1080 frames at full size. keep_model_loaded is off so SAM2 frees the GPU before training.\n\nEverything after the masks is the same as gausify_orbit_person.json: use_mask_for_poses, pose_check auto, more AKAZE features, 30k steps with SH 2, SSIM, reduce_haze, contribution pruning and Clean Splat.\n\nFrame Select: skip_duplicates drops repeated frames of generated videos (fewer frames may come out).\n\nTrain: drop_inconsistent 0.1 leaves out up to 10% of the frames the pose check finds inconsistent (the person moved, or the pose is off): only clear outliers, so a clean orbit loses nothing."
+        "Person workflow with SAM 2.1 large + ViTMatte. Needs two extra node packs (ComfyUI Manager): kijai/ComfyUI-segment-anything-2 and chflame163/ComfyUI_LayerStyle. The SAM 2.1 large and ViTMatte models are downloaded on first use.\n\nMasks: SAM2 Points turns the normalized points (default: chest and hips at the frame centre) into pixel coordinates for SAM2 on frame 0; SAM 2.1 large tracks the person through every frame of the video (dense tracking works far better than on the sparse selected frames); Frame Select picks the masks of the frames it keeps, and VITMatte refines only those. Long or high-resolution videos need a lot of RAM/VRAM for SAM2: trim them or lower the resolution before tracking. If it picks the wrong thing, move the points; for background points (label 0) also connect coordinates_negative. MaskEdgeUltraDetail V2 (VITMatte) then turns the hard SAM mask into a soft matte (hair, fingers): edge_erode/edte_dilate set the band it re-mattes around the SAM edge; raise edte_dilate for loose hair. max_megapixels 2.5 keeps 1920x1080 frames at full size. keep_model_loaded is off so SAM2 frees the GPU before training.\n\nEverything after the masks is the same as gausify_orbit_person.json: use_mask_for_poses, pose_check auto, more AKAZE features, 30k steps with SH 2, SSIM, reduce_haze, contribution pruning and Clean Splat.\n\nFrame Select: skip_duplicates drops repeated frames of generated videos (fewer frames may come out).\n\nTrain: drop_inconsistent 0.1 leaves out up to 10% of the frames the pose check finds inconsistent (the person moved, or the pose is off): only clear outliers, so a clean orbit loses nothing.\n\nCenter Splat: the SfM frame is arbitrary (origin, scale and up wherever the poses put them), so it moves the person's feet to the origin, stands them up along +y (Preview3D's up, from the orbit's cameras) and turns them to face the viewer like frame 0; saves <splat>_clean_centered.ply. height scales them to a real height (e.g. 1.75). Use -y or +z as up_axis for viewers that expect raw COLMAP files or Blender. Gausify Orbit Transform Splat moves, rotates and scales a splat by hand."
       ]
     },
     {
@@ -165,7 +165,8 @@
           "type": "GAUSIFY_CAMERAS",
           "links": [
             4,
-            10
+            10,
+            23
           ]
         },
         {
@@ -267,7 +268,7 @@
       "id": 6,
       "type": "Preview3D",
       "pos": [
-        1820,
+        2180,
         120
       ],
       "size": [
@@ -275,7 +276,7 @@
         480
       ],
       "flags": {},
-      "order": 13,
+      "order": 14,
       "mode": 0,
       "inputs": [
         {
@@ -284,7 +285,7 @@
           "widget": {
             "name": "model_file"
           },
-          "link": 5
+          "link": 24
         }
       ],
       "outputs": [],
@@ -699,6 +700,59 @@
         "Node name for S&R": "GetVideoComponents"
       },
       "widgets_values": []
+    },
+    {
+      "id": 16,
+      "type": "GausifyOrbitCenterSplat",
+      "pos": [
+        1820,
+        120
+      ],
+      "size": [
+        320,
+        250
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "ply_path",
+          "type": "STRING",
+          "link": 5
+        },
+        {
+          "name": "cameras",
+          "type": "GAUSIFY_CAMERAS",
+          "shape": 7,
+          "link": 23
+        }
+      ],
+      "outputs": [
+        {
+          "name": "ply_path",
+          "type": "STRING",
+          "links": [
+            24
+          ]
+        },
+        {
+          "name": "transform",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GausifyOrbitCenterSplat"
+      },
+      "widgets_values": [
+        "feet",
+        true,
+        "+y",
+        true,
+        0.5,
+        0.0
+      ]
     }
   ],
   "links": [
@@ -738,7 +792,7 @@
       5,
       9,
       0,
-      6,
+      16,
       0,
       "STRING"
     ],
@@ -853,6 +907,22 @@
       14,
       1,
       "MASK"
+    ],
+    [
+      23,
+      4,
+      0,
+      16,
+      1,
+      "GAUSIFY_CAMERAS"
+    ],
+    [
+      24,
+      16,
+      0,
+      6,
+      0,
+      "STRING"
     ]
   ],
   "groups": [],

@@ -7,6 +7,7 @@ from .poses import GausifyPoses
 from .refine import GausifyRefinePoses
 from .retouch import GausifyRetouchApply, GausifyRetouchClip
 from .train import GausifyTrainAdvanced, GausifyTrainSplat
+from .transform import GausifyCenterSplat, GausifyTransformSplat
 
 NODE_CLASS_MAPPINGS = {
     "GausifyOrbitFrameSelect": GausifyFrameSelect,
@@ -21,6 +22,8 @@ NODE_CLASS_MAPPINGS = {
     "GausifyOrbitRetouchClip": GausifyRetouchClip,
     "GausifyOrbitRetouchApply": GausifyRetouchApply,
     "GausifyOrbitRefinePoses": GausifyRefinePoses,
+    "GausifyOrbitCenterSplat": GausifyCenterSplat,
+    "GausifyOrbitTransformSplat": GausifyTransformSplat,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -36,6 +39,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "GausifyOrbitRetouchClip": "Gausify Orbit Retouch Clip",
     "GausifyOrbitRetouchApply": "Gausify Orbit Retouch Apply",
     "GausifyOrbitRefinePoses": "Gausify Orbit Refine Poses",
+    "GausifyOrbitCenterSplat": "Gausify Orbit Center Splat",
+    "GausifyOrbitTransformSplat": "Gausify Orbit Transform Splat",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

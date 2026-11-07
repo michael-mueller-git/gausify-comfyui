@@ -1,8 +1,8 @@
 {
   "id": "7d3e2a91-4b8c-4f0e-9c1a-5e6f7a8b9c02",
   "revision": 0,
-  "last_node_id": 11,
-  "last_link_id": 14,
+  "last_node_id": 12,
+  "last_link_id": 16,
   "nodes": [
     {
       "id": 1,
@@ -122,7 +122,7 @@
       "outputs": [],
       "properties": {},
       "widgets_values": [
-        "Person workflow with pose refinement. Recommended settings for a person (a camera orbiting someone who stands still, real or AI-generated).\n\nMask: SAM 2.1 tracks the object at the centre of frame 0, usually the person. If it picks the wrong thing, set a box on prompt_frame (e.g. 0.3,0.05,0.7,0.98) or points. With masks the splat is a cut-out.\n\nPoses: use_mask_for_poses keeps features on the person, so a background that does not move with the orbit (AI backgrounds, turntables) cannot pull the cameras. For a real orbit with a rich static background and little texture on the person, try turning it off. max_features 8000 / sfm_max_side 1920 find more matches on skin and plain clothes. pose_check auto corrects inconsistent poses, fill_missing adds frames SfM could not register.\n\nTrain: 30k steps, SH degree 2 (skin and fabric sheen), SSIM, reduce_haze (less fog around the silhouette). psnr is off so every frame trains the splat; turn it on with final_frames = all_frames to get a PSNR and still train on every frame (twice the time).\n\nTrain Advanced: contribution pruning (min views 3) removes ghosts and doubled edges, e.g. from small movements of the person. opac_solid_weight is left at 0: it hardens hair edges.\n\nClean Splat: removes splats outside the masks' visual hull (floaters, ghost silhouette) and saves <splat>_clean.ply, which Preview3D shows. Its stats report the training-view PSNR before and after; a clear drop means it cut into the person; auto_tolerance then retries with a looser hull_tolerance until the drop is at most 0.3 dB.\n\nFrame Select: skip_duplicates drops repeated frames of generated videos (fewer frames may come out).\n\nTrain: drop_inconsistent 0.1 leaves out up to 10% of the frames the pose check finds inconsistent (the person moved, or the pose is off): only clear outliers, so a clean orbit loses nothing.\n\nRefine Poses: pass 1 (15k steps) trains a splat only to measure the poses against: Refine Poses renders it from every camera, matches each render with its photo (ALIKED-LightGlue, downloaded on first use) and corrects the poses that clearly disagree (its stats list every frame). Pass 2 trains the final splat on the refined poses: less ghosting, sharper detail. Corrections are capped (max_rotation 2 deg, max_shift 3% of the orbit radius); correct poses are left alone. For a further round, chain another Refine Poses + Train Splat. About 1.5x the time of the single-pass workflow; needs a GPU to be practical."
+        "Person workflow with pose refinement. Recommended settings for a person (a camera orbiting someone who stands still, real or AI-generated).\n\nMask: SAM 2.1 tracks the object at the centre of frame 0, usually the person. If it picks the wrong thing, set a box on prompt_frame (e.g. 0.3,0.05,0.7,0.98) or points. With masks the splat is a cut-out.\n\nPoses: use_mask_for_poses keeps features on the person, so a background that does not move with the orbit (AI backgrounds, turntables) cannot pull the cameras. For a real orbit with a rich static background and little texture on the person, try turning it off. max_features 8000 / sfm_max_side 1920 find more matches on skin and plain clothes. pose_check auto corrects inconsistent poses, fill_missing adds frames SfM could not register.\n\nTrain: 30k steps, SH degree 2 (skin and fabric sheen), SSIM, reduce_haze (less fog around the silhouette). psnr is off so every frame trains the splat; turn it on with final_frames = all_frames to get a PSNR and still train on every frame (twice the time).\n\nTrain Advanced: contribution pruning (min views 3) removes ghosts and doubled edges, e.g. from small movements of the person. opac_solid_weight is left at 0: it hardens hair edges.\n\nClean Splat: removes splats outside the masks' visual hull (floaters, ghost silhouette) and saves <splat>_clean.ply, which Preview3D shows. Its stats report the training-view PSNR before and after; a clear drop means it cut into the person; auto_tolerance then retries with a looser hull_tolerance until the drop is at most 0.3 dB.\n\nFrame Select: skip_duplicates drops repeated frames of generated videos (fewer frames may come out).\n\nTrain: drop_inconsistent 0.1 leaves out up to 10% of the frames the pose check finds inconsistent (the person moved, or the pose is off): only clear outliers, so a clean orbit loses nothing.\n\nRefine Poses: pass 1 (15k steps) trains a splat only to measure the poses against: Refine Poses renders it from every camera, matches each render with its photo (ALIKED-LightGlue, downloaded on first use) and corrects the poses that clearly disagree (its stats list every frame). Pass 2 trains the final splat on the refined poses: less ghosting, sharper detail. Corrections are capped (max_rotation 2 deg, max_shift 3% of the orbit radius); correct poses are left alone. For a further round, chain another Refine Poses + Train Splat. About 1.5x the time of the single-pass workflow; needs a GPU to be practical.\n\nCenter Splat: the SfM frame is arbitrary (origin, scale and up wherever the poses put them), so it moves the person's feet to the origin, stands them up along +y (Preview3D's up, from the orbit's cameras) and turns them to face the viewer like frame 0; saves <splat>_clean_centered.ply. height scales them to a real height (e.g. 1.75). Use -y or +z as up_axis for viewers that expect raw COLMAP files or Blender. Gausify Orbit Transform Splat moves, rotates and scales a splat by hand."
       ]
     },
     {
@@ -265,7 +265,7 @@
       "id": 6,
       "type": "Preview3D",
       "pos": [
-        2540,
+        2900,
         120
       ],
       "size": [
@@ -273,7 +273,7 @@
         480
       ],
       "flags": {},
-      "order": 10,
+      "order": 11,
       "mode": 0,
       "inputs": [
         {
@@ -282,7 +282,7 @@
           "widget": {
             "name": "model_file"
           },
-          "link": 5
+          "link": 16
         }
       ],
       "outputs": [],
@@ -492,7 +492,8 @@
           "type": "GAUSIFY_CAMERAS",
           "links": [
             11,
-            14
+            14,
+            15
           ]
         },
         {
@@ -580,6 +581,59 @@
         0.0
       ],
       "title": "Train Splat (pass 2, refined poses)"
+    },
+    {
+      "id": 12,
+      "type": "GausifyOrbitCenterSplat",
+      "pos": [
+        2540,
+        120
+      ],
+      "size": [
+        320,
+        250
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "ply_path",
+          "type": "STRING",
+          "link": 5
+        },
+        {
+          "name": "cameras",
+          "type": "GAUSIFY_CAMERAS",
+          "shape": 7,
+          "link": 15
+        }
+      ],
+      "outputs": [
+        {
+          "name": "ply_path",
+          "type": "STRING",
+          "links": [
+            16
+          ]
+        },
+        {
+          "name": "transform",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GausifyOrbitCenterSplat"
+      },
+      "widgets_values": [
+        "feet",
+        true,
+        "+y",
+        true,
+        0.5,
+        0.0
+      ]
     }
   ],
   "links": [
@@ -619,7 +673,7 @@
       5,
       9,
       0,
-      6,
+      12,
       0,
       "STRING"
     ],
@@ -694,6 +748,22 @@
       9,
       0,
       "GAUSIFY_CAMERAS"
+    ],
+    [
+      15,
+      10,
+      0,
+      12,
+      1,
+      "GAUSIFY_CAMERAS"
+    ],
+    [
+      16,
+      12,
+      0,
+      6,
+      0,
+      "STRING"
     ]
   ],
   "groups": [],

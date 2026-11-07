@@ -22,6 +22,8 @@ sharp-frame selection, camera poses (AKAZE + incremental SfM, or COLMAP's SIFT
 | **Gausify Orbit Train Advanced** | Brush settings: growth, contribution pruning, regularisers (opacity, volume, flatten, normal consistency), learning-rate multipliers, loss (`l1_ssim` = Brush's/the app's, or `l1_ssim_lpips` + lpips_weight), render_mode (`default`/`mip`), masked_bg_grey + masked_bg_noise (masked training background, app: 0.5 / 0.5). Defaults are Brush's own (the background: the app's), so connecting it unchanged does nothing | advanced → Train Splat |
 | **Gausify Orbit Clean Splat** | cameras, ply_path; hull_carve + hull_tolerance + mask_margin (masked only), drop_unseen, max_distance, min_opacity, max_size, check_psnr, hull_extent, auto_tolerance + max_psnr_drop | ply_path (`<splat>_clean.ply`), num_splats, stats (JSON) |
 | **Gausify Orbit Refine Poses** | cameras, ply_path; max_side, max_features, min_inliers, max_rotation (deg), max_shift (% of the orbit radius) | GAUSIFY_CAMERAS (corrected poses, for a second Train Splat), stats (JSON) |
+| **Gausify Orbit Center Splat** | ply_path, cameras (optional); anchor (`feet`/`center`/`bbox_center`/`none`), upright, up_axis (`+y`/`-y`/`+z`), face_first_camera, min_opacity, height | ply_path (`<splat>_centered.ply`), transform (JSON) |
+| **Gausify Orbit Transform Splat** | ply_path, transform (optional); offset_x/y/z, rotate_x/y/z (deg), scale | ply_path (`<splat>_moved.ply`), transform (JSON) |
 | **Gausify Orbit SAM2 Points** | images; points (normalized `x,y,label;...`) | coordinates_positive, coordinates_negative (pixel JSON for kijai's SAM2 nodes) |
 | **Gausify Orbit Retouch Clip** | cameras, ply_path; motion (`wave`, `orbit_below`/`_above`, `arc_below`/`_above`), tilt, photo, seconds, fps, long_side | reference (IMAGE), alpha (MASK), clip, info |
 | **Gausify Orbit Retouch Apply** | cameras, ply_path, clip, restored (IMAGE); steps, restored_ratio, max_splats, max_resolution, ssim, reduce_haze, despill + strength, seed, drop_inconsistent, deflicker; advanced (optional) | ply_path (`<splat>_retouch.ply`), num_splats, stats (JSON) |
@@ -179,6 +181,55 @@ the dataset's cameras, and saves `<splat>_clean.ply` next to the input:
   `max_psnr_drop` (0.3 dB), it retries with `hull_tolerance` +0.15 (up to 0.85).
   `stats.auto` lists the tries.
 
+### Centring and moving the splat
+
+The splat comes out in the SfM frame, which is arbitrary. Its origin, scale
+and up are wherever the pose estimation put them (COLMAP's convention: y points
+down), so a raw splat opens off-centre and tilted.
+
+**Gausify Orbit Center Splat** fixes that:
+
+- `anchor`: what goes to the origin.
+  - `feet` (default): centred horizontally, lowest point on the floor
+  - `center`: the median of the opaque splats
+  - `bbox_center`: the centre of their box
+  - `none`: rotate and scale only
+
+  Only splats at least `min_opacity` (0.5) opaque count, and the extent uses
+  the 1st to 99th percentile, so floaters don't move it.
+- `upright`: stands the subject along `up_axis`.
+  - With `cameras` connected, up is the orbit plane's normal, on the side of
+    the frames' up.
+  - Without cameras, up is the splat's longest axis (a standing person).
+- `up_axis`:
+  - `+y`: ComfyUI Preview3D, three.js, glTF
+  - `-y`: viewers that expect raw COLMAP / 3DGS files
+  - `+z`: Blender
+- `face_first_camera`: turns the subject so the viewer's default front view
+  shows what frame 0 saw.
+- `height` (0 = off): scales the subject to that height, e.g. 1.75 for a
+  person in metres. The SfM scale has no real unit.
+
+**Gausify Orbit Transform Splat** moves, rotates (x, then y, then z, about
+the origin) and scales a splat by hand. Its optional `transform` input replays
+another node's `transform` output first, e.g. the centring of one splat applied
+to a retrained one.
+
+Both nodes rewrite everything a splat stores, not only the positions:
+
+- orientations and sizes
+- the view-dependent colour (spherical harmonics, degree 1 to 4), rotated
+  band by band so highlights stay where they were
+- Brush's `Vertical axis` comment
+
+Rendered from a camera moved the same way, a transformed splat is identical to
+the original (above 100 dB PSNR in Brush). Without the colour rotation it would
+be about 40 dB.
+
+Put them last: Clean Splat, Retouch and Refine Poses need the splat in the
+cameras' frame. The person workflows end with Clean Splat -> Center Splat ->
+Preview3D.
+
 ### Retouch: fill in angles the orbit missed
 
 A port of the app's Retouch ([docs](https://github.com/obraia/gausify-orbit)):
@@ -227,7 +278,9 @@ set up for a camera orbiting a person who stands still:
 - **Train Advanced**: contribution pruning (`contrib_prune_min_views 3`) removes
   ghosts and doubled edges caused by small movements of the person. Opacity
   regularisers stay at 0 because they harden hair.
-- **Clean Splat**: hull carving with its defaults; Preview3D shows the cleaned splat.
+- **Clean Splat**: hull carving with its defaults.
+- **Center Splat**: feet on the origin, standing along +y, facing the viewer like
+  frame 0; Preview3D shows the cleaned, centred splat.
 
 Everything else in that workflow stays at the app's defaults.
 
