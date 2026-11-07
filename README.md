@@ -21,6 +21,7 @@ sharp-frame selection, camera poses (AKAZE + incremental SfM, or COLMAP's SIFT
 | **Gausify Orbit Train Splat** | cameras; preset, steps, sh_degree, max_splats (millions), max_resolution, ssim, reduce_haze (masked only), psnr, despill + strength (masked only), seed, filename_prefix, psnr_holdout_every, final_frames (`holdout`/`all_frames`), drop_inconsistent, deflicker; advanced (optional) | ply_path (relative to the output folder), num_splats, psnr |
 | **Gausify Orbit Train Advanced** | Brush settings: growth, contribution pruning, regularisers (opacity, volume, flatten, normal consistency), learning-rate multipliers, loss (`l1_ssim` = Brush's/the app's, or `l1_ssim_lpips` + lpips_weight), render_mode (`default`/`mip`), masked_bg_grey + masked_bg_noise (masked training background, app: 0.5 / 0.5). Defaults are Brush's own (the background: the app's), so connecting it unchanged does nothing | advanced → Train Splat |
 | **Gausify Orbit Clean Splat** | cameras, ply_path; hull_carve + hull_tolerance + mask_margin (masked only), drop_unseen, max_distance, min_opacity, max_size, check_psnr, hull_extent, auto_tolerance + max_psnr_drop | ply_path (`<splat>_clean.ply`), num_splats, stats (JSON) |
+| **Gausify Orbit Refine Poses** | cameras, ply_path; max_side, max_features, min_inliers, max_rotation (deg), max_shift (% of the orbit radius) | GAUSIFY_CAMERAS (corrected poses, for a second Train Splat), stats (JSON) |
 | **Gausify Orbit SAM2 Points** | images; points (normalized `x,y,label;...`) | coordinates_positive, coordinates_negative (pixel JSON for kijai's SAM2 nodes) |
 | **Gausify Orbit Retouch Clip** | cameras, ply_path; motion (`wave`, `orbit_below`/`_above`, `arc_below`/`_above`), tilt, photo, seconds, fps, long_side | reference (IMAGE), alpha (MASK), clip, info |
 | **Gausify Orbit Retouch Apply** | cameras, ply_path, clip, restored (IMAGE); steps, restored_ratio, max_splats, max_resolution, ssim, reduce_haze, despill + strength, seed, drop_inconsistent, deflicker; advanced (optional) | ply_path (`<splat>_retouch.ply`), num_splats, stats (JSON) |
@@ -118,6 +119,36 @@ The Poses node's `estimator`:
   published pair pipeline runs as is (it recomputes a frame's features for every
   pair; a warning says so).
 - `colmap`: COLMAP's SIFT + global mapper (isolated venv, see Install).
+
+### Refining the poses against the splat
+
+Brush can't adjust the cameras while it trains, so a slightly wrong pose
+stays in the splat as ghosting, doubled edges and soft detail. **Gausify Orbit
+Refine Poses** corrects the poses against a trained splat:
+
+```
+Poses -> Train Splat -> Refine Poses (cameras + ply_path) -> Train Splat -> Clean Splat ...
+```
+
+It renders the splat from every camera (colour and depth), matches each
+render with its photo using ALIKED-LightGlue (the same model as the Poses
+node's `aliked_lightglue`), lifts the render's keypoints to 3D with the render
+depth (opaque pixels away from depth edges; with masks, only keypoints on the
+subject), and solves the photo's pose from these 2D-3D matches (PnP-RANSAC,
+then least squares). The render is the consensus of all frames, so a photo whose
+pose is off sits shifted against it. A new pose is used only when it lowers the
+frame's median reprojection error clearly (by at least 1.5x and 0.25 px),
+has at least `min_inliers` inliers, and changes the pose by at most
+`max_rotation` / `max_shift`. Everything else keeps its pose; the stats list
+why. Smaller improvements are within the matching noise, where a small
+rotation and a sideways shift look alike. The world frame, the intrinsics and
+the 3D points stay as they were. The output is a new dataset folder (frames
+hard-linked), so the Poses node's cache is untouched.
+
+Since the splat was also fitted to the wrong poses, one round under-corrects:
+train, refine, train again. A second refine round on the new splat corrects
+further. Needs the ALIKED-LightGlue model (downloaded on first use) and, to be
+fast, a GPU.
 
 ### Cleaning up the splat
 

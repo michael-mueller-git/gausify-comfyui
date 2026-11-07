@@ -387,3 +387,34 @@ def lightglue_poses(
         f"mean error {float(model.stats['meanError']):.2f} px, f = {model.f:.1f} in {time.perf_counter() - t2:.1f} s"
     )
     return model, out
+
+
+def to_input(rgb_u8: np.ndarray, dtype=np.float32) -> np.ndarray:
+    """(H, W, 3) uint8 RGB (sides multiples of 32) -> the network's (3, H, W) input."""
+    return (np.asarray(rgb_u8).astype(np.float32) / 255.0).transpose(2, 0, 1).astype(dtype)
+
+
+def match_images(sessions: dict, pairs: list[tuple[np.ndarray, np.ndarray]], batch: int = PAIR_BATCH,
+                 min_score: float = MIN_SCORE) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Matches image pairs ((3, H, W) network inputs, one size per pair) with
+    the sessions of `_sessions` (either mode). Per pair: (keypoints A (K, 2),
+    keypoints B (K, 2), matches (M, 2) [i in A, j in B]), keypoints in input
+    pixels (pixel centres at +0.5)."""
+    out = []
+    step = max(1, int(batch))
+    for s0 in range(0, len(pairs), step):
+        chunk = pairs[s0 : s0 + step]
+        x = np.stack([im for ab in chunk for im in ab])
+        if sessions["mode"] == "split":
+            ext, mat = sessions["extractor"][0], sessions["matcher"][0]
+            kps, nk, ds = ext.run(None, {ext.get_inputs()[0].name: x})
+            matches, scores = mat.run(None, {NORM: nk, DESC: ds})
+        else:
+            pipe = sessions["pipeline"][0]
+            kps, matches, scores = pipe.run(None, {pipe.get_inputs()[0].name: x})
+        matches = np.asarray(matches, dtype=np.int64).reshape(-1, 3)
+        matches = matches[np.asarray(scores, dtype=np.float32).reshape(-1) >= float(min_score)]
+        kps = np.asarray(kps, dtype=np.float32)
+        for p in range(len(chunk)):
+            out.append((kps[2 * p], kps[2 * p + 1], matches[matches[:, 0] == p][:, 1:3]))
+    return out

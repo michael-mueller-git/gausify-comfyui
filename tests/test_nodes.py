@@ -26,11 +26,13 @@ from nodes.clean import GausifyCleanSplat  # noqa: E402
 from nodes.frame_select import GausifyFrameSelect  # noqa: E402
 from nodes.masks import GausifyMaskChroma, GausifyMaskRMBG, GausifyMaskSAM2, GausifySam2Points  # noqa: E402
 from nodes.poses import GausifyPoses  # noqa: E402
+from nodes.refine import GausifyRefinePoses  # noqa: E402
 from nodes.retouch import GausifyRetouchApply, GausifyRetouchClip  # noqa: E402
 from nodes.train import GausifyTrainAdvanced, GausifyTrainSplat, train_options  # noqa: E402
 
 MASK_NODES = (GausifyMaskChroma, GausifyMaskRMBG, GausifyMaskSAM2)
-NO_PRESET = (GausifyTrainAdvanced, GausifyCleanSplat, GausifySam2Points, GausifyRetouchClip, GausifyRetouchApply)
+NO_PRESET = (GausifyTrainAdvanced, GausifyCleanSplat, GausifySam2Points, GausifyRetouchClip, GausifyRetouchApply,
+             GausifyRefinePoses)
 
 
 @pytest.fixture
@@ -74,7 +76,7 @@ def test_mappings():
     assert len(MASK_NODES) == 3 and all(c in nodes.NODE_CLASS_MAPPINGS.values() for c in MASK_NODES)
     assert {c for c in nodes.NODE_CLASS_MAPPINGS.values() if c not in MASK_NODES} == {
         GausifyFrameSelect, GausifyPoses, GausifyTrainSplat, GausifyTrainAdvanced, GausifyCleanSplat,
-        GausifySam2Points, GausifyRetouchClip, GausifyRetouchApply}
+        GausifySam2Points, GausifyRetouchClip, GausifyRetouchApply, GausifyRefinePoses}
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskChroma"] == "Gausify Orbit Mask (Solid Colour)"
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskRMBG"] == "Gausify Orbit Mask (RMBG-1.4)"
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["GausifyOrbitMaskSAM2"] == "Gausify Orbit Mask (SAM 2.1)"
@@ -536,6 +538,44 @@ def test_train_deflicker(monkeypatch, comfy_dirs, tmp_path):
     assert seen["dataset"] != root and seen["sparse"] and not seen["dataset"].exists()  # a temporary copy
     assert abs(m[4] / np.median(m) - 1) < 0.05 and "deflicker" in r["ui"]["text"][0]
     assert (root / "images" / "00004.png").read_bytes() == src  # the source is untouched
+
+
+def test_refine_poses_node(monkeypatch, comfy_dirs, tmp_path):
+    import gausify.pose_refine
+
+    out_dir, _ = comfy_dirs
+    ply = out_dir / "t" / "x.ply"
+    ply.parent.mkdir(parents=True)
+    ply.write_text("ply")
+    root = tmp_path / "ds"
+    (root / "sparse" / "0").mkdir(parents=True)
+    (root / "sparse" / "0" / "images.bin").write_bytes(b"x")
+    calls = []
+
+    def refine_poses(cams, src, out, *params, progress=None, cancel=None, log=None):
+        calls.append((Path(src), Path(out), params))
+        (Path(out) / "sparse" / "0").mkdir(parents=True)
+        (Path(out) / "sparse" / "0" / "images.bin").write_bytes(b"y")
+        log("refined 3/4 poses")
+        return {"views": 4, "refined": 3, "medianErrorBefore": 0.9, "medianErrorAfter": 0.4,
+                "maxRotationDeg": 0.3, "maxShiftPercent": 0.5, "frames": {}}
+
+    monkeypatch.setattr(gausify.pose_refine, "refine_poses", refine_poses)
+    cams = OrbitCameras(root=root, names=["a.png"], width=10, height=8, masked=True, stats={"check": {"x": 1}})
+    node = GausifyRefinePoses()
+    r = node.refine(cams, "t/x.ply", 1024, 2048, 40, 2.0, 2.0)
+    new, stats = r["result"]
+    assert calls[0][0] == ply.resolve() and calls[0][2] == (1024, 2048, 40, 2.0, 2.0)
+    assert new.root == calls[0][1] and new.root.parent == root.parent and new.masked
+    assert new.stats["check"] == {"x": 1} and new.stats["refine"]["refined"] == 3
+    assert json.loads(stats)["log"] == ["refined 3/4 poses"] and "3/4 poses" in r["ui"]["text"][0]
+    node.refine(cams, "t/x.ply", 1024, 2048, 40, 2.0, 2.0)
+    assert len(calls) == 1  # cached
+    node.refine(cams, "t/x.ply", 1024, 2048, 40, 1.0, 2.0)
+    assert len(calls) == 2  # other settings: a new run
+    ply.write_text("ply2")  # a retrained splat: a new run
+    node.refine(cams, "t/x.ply", 1024, 2048, 40, 2.0, 2.0)
+    assert len(calls) == 3
 
 
 def test_train_advanced_node():
