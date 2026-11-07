@@ -244,7 +244,9 @@ def test_models_json():
     assert "rmbg" in man and len([k for k in man if k.startswith("sam2-fp32-")]) == 4
     assert len([k for k in man if k.startswith("sam2-fp16-")]) == 4
     for k, e in man.items():
-        assert len(e["sha256"]) == 64 and e["bytes"] > 0 and e["url"].startswith("https://huggingface.co/"), k
+        assert len(e["sha256"]) == 64 and e["bytes"] > 0, k
+        assert e["url"].startswith(("https://huggingface.co/", "https://github.com/fabio-sim/LightGlue-ONNX/")), k
+    assert {f"aliked-lightglue-k{k}" for k in (1024, 2048, 3072, 3584)} <= set(man)
 
 
 def test_model_dir_default(monkeypatch, tmp_path):

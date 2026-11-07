@@ -16,7 +16,7 @@ from .types import SfmModel
 
 log = logging.getLogger("gausify.sfm")
 
-ESTIMATORS = ("akaze", "colmap")
+ESTIMATORS = ("akaze", "aliked_lightglue", "colmap")
 
 
 def _times_map(names: Sequence[str], times) -> dict[str, float] | None:
@@ -70,6 +70,13 @@ def run_sfm(
         from .sfm_akaze import akaze_poses
 
         model, matches = akaze_poses(
+            images_dir, names, masks_dir, pairs, max_side, max_features, progress=progress, cancel=cancel,
+            closed_loop=bool(closed_loop), log=say,
+        )
+    elif est == "aliked_lightglue":
+        from .sfm_lightglue import lightglue_poses
+
+        model, matches = lightglue_poses(
             images_dir, names, masks_dir, pairs, max_side, max_features, progress=progress, cancel=cancel,
             closed_loop=bool(closed_loop), log=say,
         )

@@ -9,6 +9,7 @@ import shutil
 from pathlib import Path
 
 from gausify.presets import DEFAULT_PRESET, PRESETS, SFM_MAX_FEATURES, SFM_MAX_SIDE
+from gausify.sfm import ESTIMATORS
 from gausify.types import OrbitCameras, OrbitTimes
 
 from .common import (
@@ -72,8 +73,11 @@ class GausifyPoses:
             "required": {
                 "images": ("IMAGE",),
                 "preset": preset_input(),
-                "estimator": (["akaze", "colmap"], {"default": "akaze",
-                              "tooltip": "akaze: AKAZE + incremental SfM; colmap: COLMAP SIFT + global mapper."}),
+                "estimator": (list(ESTIMATORS), {"default": "akaze", "tooltip": (
+                    "akaze: AKAZE + incremental SfM (the app); aliked_lightglue: learned features (RaCo-ALIKED) "
+                    "matched by LightGlue + the same incremental SfM, more robust on skin, plain clothes, blur "
+                    "and large angle steps (ONNX model ~65 MB, downloaded on first use; needs a GPU to be fast); "
+                    "colmap: COLMAP SIFT + global mapper.")}),
                 "match_window": ("INT", {"default": _P["match_window"], "min": 3, "max": 40,
                                          "tooltip": "Neighbours matched on each side."}),
                 "closed_loop": ("BOOLEAN", {"default": _P["closed_loop"],
@@ -86,12 +90,14 @@ class GausifyPoses:
                 "pose_check": (["off", "auto", "always"], {"default": "off",
                                "tooltip": "Consistency check (and correction) of the poses against the masks."}),
                 "sfm_max_side": ("INT", {"default": SFM_MAX_SIDE, "min": 320, "max": 4096, "step": 32,
-                                         "tooltip": "akaze: features are detected on the frames scaled to fit this "
-                                                    "size (no upscaling). The app: 1600."}),
+                                         "tooltip": "akaze / aliked_lightglue: features are detected on the frames "
+                                                    "scaled to fit this size (no upscaling; aliked_lightglue rounds "
+                                                    "to multiples of 32). The app: 1600."}),
                 "max_features": ("INT", {"default": SFM_MAX_FEATURES, "min": 500, "max": 32000, "step": 500,
                                          "tooltip": "akaze: the strongest features kept per frame. More helps "
                                                     "low-texture subjects (skin, plain clothes); slower matching. "
-                                                    "The app: 4000."}),
+                                                    "The app: 4000. aliked_lightglue: picks the model with the "
+                                                    "most keypoints up to this (1024, 2048, 3072 or 3584)."}),
             },
             "optional": {
                 "frame_times": ("ORBIT_TIMES",),
@@ -122,6 +128,10 @@ class GausifyPoses:
         if estimator == "akaze" and (int(sfm_max_side), int(max_features)) != (SFM_MAX_SIDE, SFM_MAX_FEATURES):
             # Only when changed: the default cache keys stay those of earlier versions.
             opts["akaze"] = {"max_side": int(sfm_max_side), "max_features": int(max_features)}
+        elif estimator == "aliked_lightglue":
+            from gausify.sfm_lightglue import model_keypoints
+
+            opts["akaze"] = {"max_side": int(sfm_max_side), "max_features": model_keypoints(int(max_features))}
         root, names, w, h, masked = prepare_dataset(images, masks)
         if len(names) < 3:
             raise ValueError("Too few images (at least 3).")

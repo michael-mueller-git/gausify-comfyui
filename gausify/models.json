@@ -61,5 +61,33 @@
     "url": "https://huggingface.co/obraia/sam2.1-tiny-video-onnx-fp16/resolve/c6f0b87d6562f8926ff6619bbd70e1e7400e1569/memory_encoder.onnx",
     "sha256": "d5c21573d2de61d2c35702c4e50f18215314b0de82bb3f9145e1a075a169345c",
     "bytes": 2837008
+  },
+  "aliked-lightglue-k1024": {
+    "label": "RaCo-ALIKED + LightGlue (1024 keypoints)",
+    "file": "raco_aliked_lightglue_pipeline_k1024.onnx",
+    "url": "https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v3.0/raco_aliked_lightglue_pipeline_k1024.onnx",
+    "sha256": "575e1746138204e19027cb37541cd840c7fc9f2c932b844e9685354a3913bda1",
+    "bytes": 65769785
+  },
+  "aliked-lightglue-k2048": {
+    "label": "RaCo-ALIKED + LightGlue (2048 keypoints)",
+    "file": "raco_aliked_lightglue_pipeline_k2048.onnx",
+    "url": "https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v3.0/raco_aliked_lightglue_pipeline_k2048.onnx",
+    "sha256": "ea4a4ab2cb5569580bccdd29037bf1437363c5ec1c0d1c0638840a3096332ae6",
+    "bytes": 65769816
+  },
+  "aliked-lightglue-k3072": {
+    "label": "RaCo-ALIKED + LightGlue (3072 keypoints)",
+    "file": "raco_aliked_lightglue_pipeline_k3072.onnx",
+    "url": "https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v3.0/raco_aliked_lightglue_pipeline_k3072.onnx",
+    "sha256": "f4d8e64a14c1b27943faf946acc1816e425d20ad2248f545b388a84485bbc0fd",
+    "bytes": 64135850
+  },
+  "aliked-lightglue-k3584": {
+    "label": "RaCo-ALIKED + LightGlue (3584 keypoints)",
+    "file": "raco_aliked_lightglue_pipeline_k3584.onnx",
+    "url": "https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v3.0/raco_aliked_lightglue_pipeline_k3584.onnx",
+    "sha256": "373307dc324aa09488cc3f2e9944362203ae9bf0e91ab9a218fb624301e29fd7",
+    "bytes": 64135850
   }
 }

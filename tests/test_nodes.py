@@ -104,7 +104,7 @@ def test_input_types_match_app_ranges():
     assert GausifyFrameSelect.RETURN_TYPES == ("IMAGE", "ORBIT_TIMES", "MASK")
 
     p = GausifyPoses.INPUT_TYPES()
-    assert p["required"]["estimator"][0] == ["akaze", "colmap"]
+    assert p["required"]["estimator"][0] == ["akaze", "aliked_lightglue", "colmap"]
     assert p["required"]["estimator"][1]["default"] == "akaze"
     assert p["required"]["pose_check"][0] == ["off", "auto", "always"]
     assert (p["required"]["match_window"][1]["min"], p["required"]["match_window"][1]["max"]) == (3, 40)
@@ -323,6 +323,13 @@ def test_poses_wiring_and_cache(monkeypatch, comfy_dirs):
     # COLMAP ignores them
     node.poses(imgs, "custom", "colmap", 6, False, False, False, True, "off", sfm_max_side=1920, max_features=8000)
     assert len(calls) == 5 and calls[4]["limits"] == {}
+    # ALIKED-LightGlue: always passed, max_features snapped to a published model
+    node.poses(imgs, "custom", "aliked_lightglue", 6, False, False, False, True, "off")
+    assert calls[5]["estimator"] == "aliked_lightglue"
+    assert calls[5]["limits"] == {"max_side": 1600, "max_features": 3584}
+    node.poses(imgs, "custom", "aliked_lightglue", 6, False, False, False, True, "off", sfm_max_side=1024,
+               max_features=2500)
+    assert len(calls) == 7 and calls[6]["limits"] == {"max_side": 1024, "max_features": 2048}
 
 
 def test_poses_too_few_registered(monkeypatch, comfy_dirs):

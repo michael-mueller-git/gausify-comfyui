@@ -5,7 +5,7 @@
 # either it looks for venv/ or .venv/ next to ComfyUI, and /comfy/mnt/venv):
 #   scripts/install.sh [--models] [--colmap]
 #
-#   --models   also download the ONNX mask models (SAM 2.1 fp32, RMBG-1.4; ~350 MB)
+#   --models   also download the ONNX models (SAM 2.1 fp32, RMBG-1.4, ALIKED-LightGlue k3584; ~415 MB)
 #   --colmap   also build the isolated COLMAP venv (scripts/setup-colmap-env.sh)
 #
 # Steps:
@@ -133,7 +133,7 @@ except Exception as e:  # noqa: BLE001
     print(f"  brush-cli: FAILED ({e}); Train Splat will retry on first use", file=sys.stderr)
 if sys.argv[1] == "1":
     for name in ("sam2-fp32-vision_encoder", "sam2-fp32-mask_decoder", "sam2-fp32-memory_attention",
-                 "sam2-fp32-memory_encoder", "rmbg"):
+                 "sam2-fp32-memory_encoder", "rmbg", "aliked-lightglue-k3584"):
         try:
             print(f"  {name}:", ensure_model(name))
         except Exception as e:  # noqa: BLE001

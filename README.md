@@ -4,7 +4,7 @@ Turn an orbit video (a camera circling a subject, e.g. an AI-generated
 turntable) into a 3D Gaussian splat, inside ComfyUI. The nodes reproduce the
 pipeline and output of [gausify-orbit](https://github.com/obraia/gausify-orbit):
 sharp-frame selection, camera poses (AKAZE + incremental SfM, or COLMAP's SIFT
-+ global mapper), optional masked (cut-out) training, and training with
++ global mapper; beyond the app, learned ALIKED + LightGlue features), optional masked (cut-out) training, and training with
 [Brush](https://github.com/ArthurBrussee/brush).
 
 **NVIDIA / CUDA only, Linux x86-64 only.**
@@ -17,7 +17,7 @@ sharp-frame selection, camera poses (AKAZE + incremental SfM, or COLMAP's SIFT
 | **Gausify Orbit Mask (Solid Colour)** | images; auto_color, color, tolerance, softness, contiguous | MASK, stats (JSON) |
 | **Gausify Orbit Mask (RMBG-1.4)** | images; accept_noncommercial_license, device | MASK, stats (JSON) |
 | **Gausify Orbit Mask (SAM 2.1)** | images; prompt_frame, box, points, variant (`fp32`/`fp16`), device | MASK, stats (JSON) |
-| **Gausify Orbit Poses** | images, frame_times, masks (optional); preset, estimator (`akaze`/`colmap`), match_window, closed_loop, flat_orbit, fill_missing, use_mask_for_poses, pose_check (`off`/`auto`/`always`, needs masks), sfm_max_side + max_features (AKAZE limits, app: 1600 / 4000) | GAUSIFY_CAMERAS, colmap_path, stats (JSON) |
+| **Gausify Orbit Poses** | images, frame_times, masks (optional); preset, estimator (`akaze`/`aliked_lightglue`/`colmap`), match_window, closed_loop, flat_orbit, fill_missing, use_mask_for_poses, pose_check (`off`/`auto`/`always`, needs masks), sfm_max_side + max_features (AKAZE / ALIKED limits, app: 1600 / 4000) | GAUSIFY_CAMERAS, colmap_path, stats (JSON) |
 | **Gausify Orbit Train Splat** | cameras; preset, steps, sh_degree, max_splats (millions), max_resolution, ssim, reduce_haze (masked only), psnr, despill + strength (masked only), seed, filename_prefix, psnr_holdout_every, final_frames (`holdout`/`all_frames`), drop_inconsistent; advanced (optional) | ply_path (relative to the output folder), num_splats, psnr |
 | **Gausify Orbit Train Advanced** | Brush settings: growth, contribution pruning, regularisers (opacity, volume, flatten, normal consistency), learning-rate multipliers. Defaults are Brush's own, so connecting it unchanged does nothing | advanced → Train Splat |
 | **Gausify Orbit Clean Splat** | cameras, ply_path; hull_carve + hull_tolerance + mask_margin (masked only), drop_unseen, max_distance, min_opacity, max_size, check_psnr, hull_extent, auto_tolerance + max_psnr_drop | ply_path (`<splat>_clean.ply`), num_splats, stats (JSON) |
@@ -56,6 +56,32 @@ the median sharpness (e.g. 0.4). Fewer frames may come out. `masks` takes one
 mask per source frame (e.g. SAM2 tracking on the whole video, where tracking
 works best). The `masks` output holds the picked frames' masks at the frames'
 size, ready for the Poses node.
+
+### Pose estimators
+
+The Poses node's `estimator`:
+
+- `akaze` (default, the app's): AKAZE features, nearest-neighbour matching and an
+  incremental SfM. Fast, also on CPU.
+- `aliked_lightglue` (beyond the app): learned features. RaCo keypoints with
+  ALIKED descriptors, matched by LightGlue, then the same incremental SfM as
+  `akaze` (so `fill_missing`, `flat_orbit` and the pose check work the same).
+  Learned features stay stable under the things that make AKAZE lose track:
+  skin, plain clothes, motion blur and large angle steps between frames. LightGlue
+  also rejects matches that only look alike, as on fabric patterns or hair. Try it when
+  `akaze` registers too few cameras or the pose check reports bad frames.
+  `sfm_max_side` is the size the network runs at (rounded to multiples of 32).
+  `max_features` picks the model: 1024, 2048, 3072 or 3584 keypoints per frame, the
+  largest up to the value (the default 4000 picks 3584). With `use_mask_for_poses`,
+  only keypoints on the subject are kept, so with a small subject in the frame
+  fewer keypoints remain; then use the 3584 model. The ONNX model (about
+  65 MB, from [LightGlue-ONNX](https://github.com/fabio-sim/LightGlue-ONNX),
+  Apache-2.0; RaCo and LightGlue Apache-2.0, ALIKED BSD-3-Clause) is downloaded
+  on first use into `models/gausify/models`. It runs on ONNX Runtime's CUDA
+  provider; on CPU it takes seconds per frame pair (minutes for a whole
+  orbit). Each pair runs the full network, so a frame's features are computed
+  once per pair it is in.
+- `colmap`: COLMAP's SIFT + global mapper (isolated venv, see Install).
 
 ### Cleaning up the splat
 
@@ -119,7 +145,8 @@ set up for a camera orbiting a person who stands still:
   cameras. Turn it off for a real orbit with a detailed static background around a
   person with little texture. Also: `pose_check = auto`, `fill_missing`,
   `sfm_max_side 1920` and `max_features 8000` (more matches on skin and plain
-  clothes).
+  clothes). If AKAZE still loses cameras, switch `estimator` to
+  `aliked_lightglue` (see Pose estimators).
 - **Train**: 30k steps, SH degree 2, 3M splats, 1920 px, SSIM, `reduce_haze`,
   `drop_inconsistent 0.1`.
   `psnr` is off, so every frame trains the splat (set `final_frames = all_frames`
@@ -207,7 +234,8 @@ with `onnxruntime-gpu`. It then downloads `brush-cli` into
 `models/gausify/bin`, and checks that OpenCV has AKAZE and that ONNX Runtime
 can use CUDA. Options:
 
-- `--models`: also downloads the mask models (SAM 2.1 fp32 and RMBG-1.4, about 350 MB). With them in
+- `--models`: also downloads the ONNX models (SAM 2.1 fp32, RMBG-1.4 and the 3584-keypoint
+  ALIKED-LightGlue, about 415 MB). With them in
   place, the check also tests that CUDA actually initialises.
 - `--colmap`: also builds the COLMAP venv (see below).
 
