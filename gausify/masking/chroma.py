@@ -68,3 +68,21 @@ def chroma_mask(rgb: np.ndarray, key, tolerance: float, softness: float, contigu
     if keep is not None:
         mask[keep] = 255
     return mask
+
+
+def chroma_masks(frames: np.ndarray, auto_color: bool, manual, tolerance: float, softness: float,
+                 contiguous: bool, progress=None, cancel=None) -> tuple[np.ndarray, list, float]:
+    """Masks of all `frames` (n,h,w,3 uint8). Returns (masks, keys, mean coverage 0..1)."""
+    n = len(frames)
+    masks = np.zeros(frames.shape[:3], np.uint8)
+    keys, coverage = [], 0.0
+    for i in range(n):
+        if cancel is not None and cancel():
+            raise InterruptedError("cancelled")
+        key = border_key(frames[i]) if auto_color else manual
+        keys.append(key)
+        masks[i] = chroma_mask(frames[i], key, tolerance, softness, contiguous)
+        coverage += float(masks[i].sum(dtype=np.float64)) / (255.0 * masks[i].size)
+        if progress:
+            progress((i + 1) / n, f"solid colour {i + 1}/{n}")
+    return masks, keys, coverage / max(n, 1)

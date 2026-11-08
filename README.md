@@ -353,12 +353,16 @@ git clone https://github.com/michael-mueller-git/gausify-comfyui
 gausify-comfyui/scripts/install.sh            # add --models and/or --colmap, see below
 ```
 
-`scripts/install.sh` installs `requirements.txt` and repairs the two setups
-that break the nodes: it keeps exactly one OpenCV build, between 4.12 and 5
-(an installed contrib build stays contrib), and replaces plain `onnxruntime`
-with `onnxruntime-gpu`. It then downloads `brush-cli` into
-`models/gausify/bin`, and checks that OpenCV has AKAZE and that ONNX Runtime
-can use CUDA. Options:
+`scripts/install.sh` builds the pack's own **core environment**
+(`models/gausify/core-venv`: OpenCV 4, ONNX Runtime GPU, scipy, ...), downloads `brush-cli` into
+`models/gausify/bin`, and checks that the environment has AKAZE and that ONNX Runtime can use
+CUDA. All compute code (frames, masks, poses, clean, refine, ...) runs in that venv as a
+subprocess, so other custom nodes that install OpenCV 5 or a plain `onnxruntime` into
+ComfyUI's shared venv cannot break it. torch is not duplicated: ComfyUI's site-packages are
+appended after the venv's own through a `.pth` file. The venv is also created on first use if
+you skip the script (needs network access to pip); `GAUSIFY_CORE_VENV` moves it,
+`GAUSIFY_CORE_PIP_ARGS` adds pip arguments, and `GAUSIFY_ISOLATE=0` runs everything in
+ComfyUI's process instead. Options:
 
 - `--models`: also downloads the ONNX models (SAM 2.1 fp32, RMBG-1.4 and the 3584-keypoint
   ALIKED-LightGlue, about 415 MB). With them in

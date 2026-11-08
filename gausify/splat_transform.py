@@ -385,3 +385,17 @@ def parse_transform(text: str | None) -> np.ndarray | None:
     M = np.asarray(obj["matrix"] if isinstance(obj, dict) else obj, np.float64)
     decompose(M)  # validates
     return M
+
+
+def write_transformed(src, root, suffix: str, M) -> tuple[str, int]:
+    """Writes `<src stem>_<suffix>.ply` next to `src` with the transform `M` applied.
+    Returns the path relative to `root` and the splat count."""
+    from pathlib import Path
+
+    from .splat_clean import Ply, read_ply, write_ply
+
+    src, root = Path(src), Path(root)
+    ply = read_ply(src)
+    out = src.with_name(f"{src.stem}_{suffix}.ply")
+    write_ply(out, Ply(header=transform_header(ply.header, M), vertex=ply.vertex), apply_transform(ply.vertex, M))
+    return out.relative_to(root).as_posix(), len(ply.vertex)

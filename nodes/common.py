@@ -86,7 +86,13 @@ class Progress:
 def run_cancellable(fn, *args, **kwargs):
     """Calls fn; a cancellation raised inside (InterruptedError or our
     Cancelled) becomes ComfyUI's interrupt when the user interrupted."""
+    from gausify import isolated
+
     try:
+        if isolated.enabled() and isolated.isolatable(fn):
+            # Compute code runs in the pack's own venv (OpenCV 4, ONNX Runtime GPU, ...), not in
+            # ComfyUI's shared one.
+            return isolated.call(fn, *args, should_cancel=interrupted, one_way=(Progress,), **kwargs)
         return fn(*args, **kwargs)
     except Exception as e:
         if interrupted() or isinstance(e, InterruptedError) or type(e).__name__ == "Cancelled":

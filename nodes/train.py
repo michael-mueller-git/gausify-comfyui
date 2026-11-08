@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 
 from gausify.deflicker import WINDOW as DEFLICKER_WINDOW
+from gausify.deflicker import deflicker_images
 from gausify.posecheck.score import OUTLIER_RATIO
 from gausify.presets import DEFAULT_PRESET, PRESETS, REDUCE_HAZE_WEIGHT
 from gausify.train_config import (
@@ -155,7 +156,7 @@ class GausifyTrainSplat:
                 if work.exists():
                     shutil.rmtree(work)
                 dataset = copy_dataset(cameras, work)
-            flicker = run_cancellable(_deflicker, cameras, dataset, float(deflicker), progress.sub(0.0, 0.02))
+            flicker = _deflicker(cameras, dataset, float(deflicker), progress.sub(0.0, 0.02))
             raise_if_interrupted()
         dropped = []
         if float(drop_inconsistent) > 0:
@@ -223,11 +224,9 @@ def copy_dataset(cameras: OrbitCameras, out: Path) -> Path:
 def _deflicker(cameras: OrbitCameras, dataset: Path, strength: float, progress=None) -> dict:
     """Deflickers the photos of a training copy (in orbit order: the poses'
     frame names); other images (Retouch's restored frames) are left alone."""
-    from gausify.deflicker import deflicker_images
-
     files = {p.stem: p for p in (Path(dataset) / "images").iterdir() if p.is_file()}
     paths = [files[Path(n).stem] for n in cameras.names if Path(n).stem in files]
-    stats = deflicker_images(paths, strength, progress=progress, cancel=interrupted)
+    stats = run_cancellable(deflicker_images, paths, strength, progress=progress, cancel=interrupted)
     log.info("gausify train: deflicker on %d frames: mean %.2f%%, max %.2f%% correction",
              stats["frames"], stats["meanCorrection"], stats["maxCorrection"])
     return stats

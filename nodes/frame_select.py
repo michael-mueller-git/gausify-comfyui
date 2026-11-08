@@ -135,5 +135,5 @@ class GausifyFrameSelect:
         if masks is not None:
             from gausify.frames import select_masks
 
-            sel = torch.from_numpy(select_masks(m, times.indices, out.shape[2], out.shape[1]))
+            sel = torch.from_numpy(run_cancellable(select_masks, m, times.indices, out.shape[2], out.shape[1]))
         return (torch.from_numpy(np.ascontiguousarray(out, dtype=np.float32)), times, sel)

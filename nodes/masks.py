@@ -142,26 +142,19 @@ class GausifyMaskChroma(_MaskBase):
         }}
 
     def mask(self, images, auto_color, color, tolerance, softness, contiguous):
-        from gausify.masking.chroma import border_key, chroma_mask
+        from gausify.masking.chroma import chroma_masks
 
         manual = parse_color(color)
         frames = images_to_u8(images)
         n = len(frames)
-        progress = Progress()
-        masks = np.zeros(frames.shape[:3], np.uint8)
-        keys, coverage = [], 0.0
-        for i in range(n):
-            if interrupted():
-                raise_if_interrupted()
-            key = border_key(frames[i]) if auto_color else manual
-            keys.append(key)
-            masks[i] = chroma_mask(frames[i], key, tolerance, softness, contiguous)
-            coverage += float(masks[i].sum(dtype=np.float64)) / (255.0 * masks[i].size)
-            progress((i + 1) / n, f"solid colour {i + 1}/{n}")
+        masks, keys, mean_coverage = run_cancellable(
+            chroma_masks, frames, bool(auto_color), manual, tolerance, softness, contiguous,
+            progress=Progress(), cancel=interrupted,
+        )
         key_color = tuple(int(sorted(k[c] for k in keys)[len(keys) >> 1]) for c in range(3))
         if auto_color:
             log.info("gausify mask: detected background color: rgb(%d, %d, %d)", *key_color)
-        return _result(masks, _stats(n, coverage / n, 0, "Solid color", key_color))
+        return _result(masks, _stats(n, mean_coverage, 0, "Solid color", key_color))
 
 
 class GausifyMaskRMBG(_MaskBase):

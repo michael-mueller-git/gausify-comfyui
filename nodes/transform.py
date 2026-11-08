@@ -8,7 +8,7 @@ import json
 import logging
 from pathlib import Path
 
-from gausify.splat_transform import ANCHORS, UP_AXES
+from gausify.splat_transform import ANCHORS, UP_AXES, write_transformed
 
 from .clean import resolve_ply
 from .common import CATEGORY, run_cancellable
@@ -18,16 +18,6 @@ log = logging.getLogger("gausify.nodes")
 TRANSFORM_TOOLTIP = ("The transform applied, as JSON (4x4 matrix, scale, rotation, translation): feed it to "
                      "Transform Splat to apply the same move to another splat of this subject (e.g. a retrained "
                      "one).")
-
-
-def _write(src: Path, root: Path, suffix: str, M) -> tuple[str, int]:
-    from gausify.splat_clean import Ply, read_ply, write_ply
-    from gausify.splat_transform import apply_transform, transform_header
-
-    ply = read_ply(src)
-    out = src.with_name(f"{src.stem}_{suffix}.ply")
-    write_ply(out, Ply(header=transform_header(ply.header, M), vertex=ply.vertex), apply_transform(ply.vertex, M))
-    return out.relative_to(root).as_posix(), len(ply.vertex)
 
 
 class GausifyCenterSplat:
@@ -91,7 +81,7 @@ class GausifyCenterSplat:
         M, info = center_transform(ply.vertex, anchor=anchor, upright=bool(upright), up_axis=up_axis,
                                    face_first_camera=bool(face_first_camera), min_opacity=float(min_opacity),
                                    height=float(height), views=views)
-        rel, n = run_cancellable(_write, src, root, "centered", M)
+        rel, n = run_cancellable(write_transformed, src, root, "centered", M)
         tr = {**transform_json(M), "info": info}
         text = (f"{rel}: {n} splats, anchor {anchor}, " + (f"upright ({up_axis}, up from {info['up']})"
                 if upright else "not rotated") + f", height {info['height']:.3g}"
@@ -145,7 +135,7 @@ class GausifyTransformSplat:
         before = parse_transform(transform)
         if before is not None:
             M = M @ before
-        rel, n = run_cancellable(_write, src, root, "moved", M)
+        rel, n = run_cancellable(write_transformed, src, root, "moved", M)
         tr = transform_json(M)
         text = (f"{rel}: {n} splats moved by ({', '.join(f'{x:.3g}' for x in tr['translation'])}), rotated "
                 f"{tr['rotationDeg']:.3g} deg, scaled x{tr['scale']:.3g}")

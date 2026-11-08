@@ -9,11 +9,8 @@
 #   --colmap   also build the isolated COLMAP venv (scripts/setup-colmap-env.sh)
 #
 # Steps:
-#   1. OpenCV: keep exactly one OpenCV distribution, version >= 4.12 and < 5
-#      (OpenCV 5 has no cv2.AKAZE_create). An installed contrib build is kept
-#      as contrib, since other nodes may need its extra modules.
-#   2. ONNX Runtime: onnxruntime-gpu only (plain onnxruntime hides the CUDA provider).
-#   3. pip install the rest of requirements.txt.
+#   1. Core environment: a private venv (models/gausify/core-venv) with OpenCV 4, ONNX Runtime GPU,
+#      scipy, ... that the compute code runs in; torch is taken from ComfyUI. Other nodes cannot break it.
 #   4. Download brush-cli (and with --models the ONNX models) into ComfyUI's
 #      models/gausify, where the nodes look for them.
 #   5. Check: cv2.AKAZE_create, ONNX Runtime CUDA, brush-cli.
@@ -53,7 +50,6 @@ else
         exit 2
     fi
 fi
-pip=("$python" -m pip)
 
 # Caches where the nodes look inside ComfyUI (models/gausify/...), when this
 # repo sits in <ComfyUI or --base-directory>/custom_nodes.
@@ -69,54 +65,12 @@ step() { printf '\n== %s\n' "$*"; }
 
 step "Python: $("$python" -c 'import sys; print(sys.executable, sys.version.split()[0])')"
 
-# Installed distributions whose name matches a pattern, as "name==version" lines.
-dists() {
-    "$python" - "$1" <<'EOF'
-import re, sys
-from importlib.metadata import distributions
-pat = re.compile(sys.argv[1])
-seen = set()
-for d in distributions():
-    n = (d.metadata["Name"] or "").lower()
-    if pat.fullmatch(n) and n not in seen:
-        seen.add(n)
-        print(f"{n}=={d.version}")
-EOF
-}
-
-step "OpenCV"
-mapfile -t cv < <(dists 'opencv-(contrib-)?python(-headless)?')
-printf '  installed: %s\n' "${cv[@]:-none}"
-contrib=0
-bad=0
-for d in "${cv[@]}"; do
-    [[ "$d" == opencv-contrib-* ]] && contrib=1
-    major="${d##*==}"; major="${major%%.*}"
-    [[ "$major" -ge 5 ]] && bad=1
-done
-[[ ${#cv[@]} -gt 1 ]] && bad=1
-if [[ $contrib -eq 1 ]]; then want_cv="opencv-contrib-python-headless>=4.12,<5"; else want_cv="opencv-python-headless>=4.12,<5"; fi
-if [[ $bad -eq 1 ]]; then
-    echo "  fixing: removing ${cv[*]} (more than one build, or OpenCV 5), installing $want_cv"
-    "${pip[@]}" uninstall -y "${cv[@]%%==*}"
-fi
-"${pip[@]}" install "$want_cv"
-
-step "ONNX Runtime"
-mapfile -t ort < <(dists 'onnxruntime(-gpu)?')
-printf '  installed: %s\n' "${ort[@]:-none}"
-for d in "${ort[@]}"; do
-    if [[ "$d" == onnxruntime==* ]]; then
-        echo "  fixing: plain onnxruntime hides the CUDA provider; reinstalling onnxruntime-gpu"
-        "${pip[@]}" uninstall -y onnxruntime onnxruntime-gpu
-        break
-    fi
-done
-
-step "requirements.txt"
-# OpenCV is handled above (a contrib build satisfies cv2 but not the
-# opencv-python-headless name, and installing both makes them overwrite cv2/).
-"${pip[@]}" install -r <(grep -v '^opencv' "$repo/requirements.txt")
+step "Core environment (own venv: OpenCV 4, ONNX Runtime GPU, scipy, ...)"
+# The compute code runs in this venv, so other nodes can't break it (OpenCV 5, plain onnxruntime, ...).
+# torch comes from ComfyUI's site-packages through a .pth file.
+cd "$repo"
+core_python="$("$python" -c 'from gausify.core_env import ensure_core_env; print(ensure_core_env())')"
+echo "  $core_python"
 
 step "Downloads"
 cd "$repo"
@@ -144,7 +98,7 @@ EOF
 
 step "Checks"
 set +e
-"$python" - <<'EOF'
+"$core_python" - <<'EOF'
 import glob, os, sys
 status = 0
 try:
@@ -185,7 +139,6 @@ else:
 sys.exit(status)
 EOF
 checks=$?
-"${pip[@]}" check >/dev/null 2>&1 || echo "  note: 'pip check' reports conflicts (may come from other nodes): run '$python -m pip check'"
 set -e
 
 if [[ $want_colmap -eq 1 ]]; then
